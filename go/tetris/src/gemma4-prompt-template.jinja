@@ -1,0 +1,25 @@
+{%- for message in messages -%}
+{%- if message.role == "system" -%}
+<start_of_turn>user
+System: {{ message.content }}<end_of_turn>
+{%- elif message.role == "user" -%}
+<start_of_turn>user
+{%- if message.content is string -%}
+{{ message.content }}
+{%- else -%}
+{# Handles multi-part content like [{"type":"image"},{"type":"text"}] #}
+{%- for part in message.content -%}
+{%- if part.type == "image" -%}
+<|image|>
+{%- elif part.type == "text" -%}
+{{ part.text }}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+<end_of_turn>
+{%- elif message.role == "assistant" -%}
+<start_of_turn>model
+{{ message.content }}<end_of_turn>
+{%- endif -%}
+{%- endfor -%}
+<start_of_turn>model
