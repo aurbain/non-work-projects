@@ -1,14 +1,3 @@
-package main
-
-import (
-	"fmt"
-	"math/rand"
-	"time"
-)
-
-func init() {
-	// Seed the random number generator for piece generation
-	rand.Seed(time.Now().UnixNano())
 }
 
 // Global variables to simulate the game board (e.g., 10 rows, 10 columns)
