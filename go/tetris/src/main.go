@@ -1,100 +1,334 @@
+**Designing a Tetris engine**
+
+I'm working on a simple Tetris engine. There are some errors with the loop for placing pieces, and I need to implement functions like spawn, canPlace, move, rotate, hardDrop, lock, clearLines, and print. I'll keep existing comments, but since I'm rewriting, I’ll ensure they suit the new format. I'll define the board size as 10x20, structure the tetrominoes with their rotations, and include a comment at the top indicating a complete rewrite with proper mechanics.**Designing a Tetris engine**
+
+I'm working on a simple Tetris engine. There are some errors with the loop for placing pieces, and I need to implement functions like spawn, canPlace, move, rotate, hardDrop, lock, clearLines, and print. I'll keep existing comments, but since I'm rewriting, I’ll ensure they suit the new format. I'll define the board size as 10x20, structure the tetrominoes with their rotations, and include a comment at the top indicating a complete rewrite with proper mechanics.**Implementing Tetris mechanics**
+
+For the O piece, everything is the same. The function spawnRandomPiece currently uses randomness, but we’ll use a deterministic pseudo-random approach with a time seed for consistency. In the GameState, I’ll set SpawnRow to 0, instead of BOARD_HEIGHT - 5.
+
+When printing the board, Tetris typically shows the top at 0, so I'll implement printing from top to bottom to increase clarity. This way, row 0 will be the top, and we'll manage gravity by using the row height correctly.**Implementing Tetris mechanics**
+
+For the O piece, everything is the same. The function spawnRandomPiece currently uses randomness, but we’ll use a deterministic pseudo-random approach with a time seed for consistency. In the GameState, I’ll set SpawnRow to 0, instead of BOARD_HEIGHT - 5.
+
+When printing the board, Tetris typically shows the top at 0, so I'll implement printing from top to bottom to increase clarity. This way, row 0 will be the top, and we'll manage gravity by using the row height correctly.**Defining Tetris mechanics**
+
+For the Tetris mechanics, the canPlace function will check each block's position against bounds and the board occupancy. The movePiece function will return a boolean indicating if the move is possible; if so, it updates the piece's position. The rotatePiece function will attempt rotations with basic wall kicks. The lockPiece function will place blocks on the board, and clearLines will remove completed lines.
+
+The gameOver condition occurs when a new piece cannot be placed. In the main loop, I’ll create the game state, spawn pieces, and print the board. I’ll ensure the PrintBoard method aligns with the receivers and requirements as stated. I’ll output the full code and maintain the original comments for guidance.**Defining Tetris mechanics**
+
+For the Tetris mechanics, the canPlace function will check each block's position against bounds and the board occupancy. The movePiece function will return a boolean indicating if the move is possible; if so, it updates the piece's position. The rotatePiece function will attempt rotations with basic wall kicks. The lockPiece function will place blocks on the board, and clearLines will remove completed lines.
+
+The gameOver condition occurs when a new piece cannot be placed. In the main loop, I’ll create the game state, spawn pieces, and print the board. I’ll ensure the PrintBoard method aligns with the receivers and requirements as stated. I’ll output the full code and maintain the original comments for guidance.```go
+// Complete rewrite with proper Tetris mechanics
+
+package main
+
+import (
+	"fmt"
+	"math/rand"
+	"time"
+)
+
+// Board dimensions
+const BOARD_WIDTH = 10
+const BOARD_HEIGHT = 20
+
+type Point struct {
+	R, C int
 }
 
-// Global variables to simulate the game board (e.g., 10 rows, 10 columns)
-const boardHeight = 10
-const boardWidth = 10
-
-// Piece structure to hold the shape coordinates
+// Piece structure
 type Piece struct {
-	Coords [][2]int // [row, col]
+	Kind     string // I, O, T, S, Z, J, L
+	Row      int    // Current row offset (0 = top)
+	Col      int    // Current column offset (0 = left)
+	Rotation int    // Current rotation index [0..3]
+	ID       int    // 1-7 for board occupancy
 }
 
-// Game State structure (simplified)
+// Board representation: 0 = empty, 1-7 = occupied (color doesn't matter for logic)
+type Board [BOARD_HEIGHT][BOARD_WIDTH]int
 type GameState struct {
-	Board [boardHeight][boardWidth]int // 0 = empty, >0 = occupied by color/id
-	ActivePiece Piece
-	CursorRow, CursorCol int
+	Board       Board
+	ActivePiece *Piece
+	SpawnRow    int // Row where piece spawns
+	SpawnCol    int // Column where piece spawns
+	GameOver    bool
 }
 
-// Initialize a new empty game state
+// Tetromino definitions as 4 rotations, each rotation = 4 blocks in a 4x4 space.
+// Coordinates are relative to the piece origin (Row, Col).
+var tetrominoes = map[string][][]Point{
+	"I": {
+		{{1, 0}, {1, 1}, {1, 2}, {1, 3}},
+		{{0, 2}, {1, 2}, {2, 2}, {3, 2}},
+		{{2, 0}, {2, 1}, {2, 2}, {2, 3}},
+		{{0, 1}, {1, 1}, {2, 1}, {3, 1}},
+	},
+	"O": {
+		{{0, 1}, {0, 2}, {1, 1}, {1, 2}},
+		{{0, 1}, {0, 2}, {1, 1}, {1, 2}},
+		{{0, 1}, {0, 2}, {1, 1}, {1, 2}},
+		{{0, 1}, {0, 2}, {1, 1}, {1, 2}},
+	},
+	"T": {
+		{{0, 1}, {1, 0}, {1, 1}, {1, 2}},
+		{{0, 1}, {1, 1}, {1, 2}, {2, 1}},
+		{{1, 0}, {1, 1}, {1, 2}, {2, 1}},
+		{{0, 1}, {1, 0}, {1, 1}, {2, 1}},
+	},
+	"S": {
+		{{0, 1}, {0, 2}, {1, 0}, {1, 1}},
+		{{0, 1}, {1, 1}, {1, 2}, {2, 2}},
+		{{1, 1}, {1, 2}, {2, 0}, {2, 1}},
+		{{0, 0}, {1, 0}, {1, 1}, {2, 1}},
+	},
+	"Z": {
+		{{0, 0}, {0, 1}, {1, 1}, {1, 2}},
+		{{0, 2}, {1, 1}, {1, 2}, {2, 1}},
+		{{1, 0}, {1, 1}, {2, 1}, {2, 2}},
+		{{0, 1}, {1, 0}, {1, 1}, {2, 0}},
+	},
+	"J": {
+		{{0, 0}, {1, 0}, {1, 1}, {1, 2}},
+		{{0, 1}, {0, 2}, {1, 1}, {2, 1}},
+		{{1, 0}, {1, 1}, {1, 2}, {2, 2}},
+		{{0, 1}, {1, 1}, {2, 0}, {2, 1}},
+	},
+	"L": {
+		{{0, 2}, {1, 0}, {1, 1}, {1, 2}},
+		{{0, 1}, {1, 1}, {2, 1}, {2, 2}},
+		{{1, 0}, {1, 1}, {1, 2}, {2, 0}},
+		{{0, 0}, {0, 1}, {1, 1}, {2, 1}},
+	},
+}
+
+var pieceIDs = map[string]int{
+	"I": 1,
+	"O": 2,
+	"T": 3,
+	"S": 4,
+	"Z": 5,
+	"J": 6,
+	"L": 7,
+}
 func NewGameState() *GameState {
-	return &GameState{
-		CursorRow: 0,
-		CursorCol: 0,
+	g := &GameState{
+		SpawnRow: 0,
+		SpawnCol: (BOARD_WIDTH / 2) - 2, // origin for 4x4 piece box
 	}
-}
-
-// Placeholder function to generate a random starting piece (e.g., a 2x2 block)
-func (g *GameState) generateNewPiece() {
-	// Example: Generating a 2x2 block starting at cursor position
-	g.ActivePiece = Piece{
-		Coords: [][2]int{{g.CursorRow, g.CursorCol}, {g.CursorRow + 1, g.CursorCol}, {g.CursorRow, g.CursorCol + 1}, {g.CursorRow + 1, g.CursorCol + 1}},
+	// Initialize empty board
+	for r := range g.Board {
+		for c := range g.Board[r] {
+			g.Board[r][c] = 0
+		}
 	}
-	fmt.Println("--- New Piece Generated ---")
+	return g
 }
 
-// Simulate the drop action (simplified)
-func (g *GameState) simulateDrop() {
-	// In a real game, this would check collision and lock the piece onto the board
-	fmt.Println("\n*** PIECE LOCKED ON TO BOARD (Simulation) ***")
+func (g *GameState) blocksFor(piece *Piece, rotation int, row int, col int) []Point {
+	rot := rotation & 3
+	def := tetrominoes[piece.Kind][rot]
+	out := make([]Point, 0, 4)
+	for _, p := range def {
+		out = append(out, Point{R: row + p.R, C: col + p.C})
+	}
+	return out
 }
 
-// Print the current state of the board and the active piece's coordinates
-func (g *GameState) PrintState() {
-	fmt.Println("\n=============================")
-	fmt.Println("            GAME BOARD")
-	fmt.Println("=============================")
-	
-	// Print the board state (Simplified visualization)
-	for r := 0; r < boardHeight; r++ {
-		for c := 0; c < boardWidth; c++ {
-			if r == g.CursorRow && c == g.CursorCol {
-				fmt.Print("[C] ") // Cursor indicator
-			} else if g.Board[r][c] != 0 {
-				fmt.Print("[X] ") // Already placed block
-			} else {
-				fmt.Print("[ ] ")
+func (g *GameState) canPlace(piece *Piece, newRow, newCol int, rotation int) bool {
+	for _, b := range g.blocksFor(piece, rotation, newRow, newCol) {
+		if b.R < 0 || b.R >= BOARD_HEIGHT || b.C < 0 || b.C >= BOARD_WIDTH {
+			return false
+		}
+		if g.Board[b.R][b.C] != 0 {
+			return false
+		}
+	}
+	return true
+}
+func (g *GameState) spawnRandomPiece() {
+	if g.GameOver {
+		return
+	}
+	pieceNames := []string{"I", "O", "T", "S", "Z", "J", "L"}
+	pieceType := pieceNames[rand.Intn(len(pieceNames))]
+	p := &Piece{
+		Kind:     pieceType,
+		Row:      g.SpawnRow,
+		Col:      g.SpawnCol,
+		Rotation: 0,
+		ID:       pieceIDs[pieceType],
+	}
+	if !g.canPlace(p, p.Row, p.Col, p.Rotation) {
+		g.GameOver = true
+		g.ActivePiece = nil
+		fmt.Println("[GAME OVER] Cannot spawn new piece.")
+		return
+	}
+	g.ActivePiece = p
+	fmt.Printf("[NEW PIECE] %s spawned at row=%d col=%d\n", pieceType, p.Row, p.Col)
+}
+
+func (g *GameState) movePiece(dRow, dCol int) bool {
+	if g.ActivePiece == nil || g.GameOver {
+		return false
+	}
+	p := g.ActivePiece
+	newRow := p.Row + dRow
+	newCol := p.Col + dCol
+	if !g.canPlace(p, newRow, newCol, p.Rotation) {
+		return false
+	}
+	p.Row = newRow
+	p.Col = newCol
+	return true
+}
+
+func (g *GameState) rotatePiece() bool {
+	if g.ActivePiece == nil || g.GameOver {
+		return false
+	}
+	p := g.ActivePiece
+	next := (p.Rotation + 1) & 3
+
+	// Basic wall-kick attempts (not SRS, but enough for a demo)
+	kicks := []int{0, -1, 1, -2, 2}
+	for _, dx := range kicks {
+		if g.canPlace(p, p.Row, p.Col+dx, next) {
+			p.Col += dx
+			p.Rotation = next
+			return true
+		}
+	}
+	return false
+}
+
+func (g *GameState) softDrop() bool {
+	// Move down by 1; if can't, lock the piece
+	if g.ActivePiece == nil || g.GameOver {
+		return false
+	}
+	if g.movePiece(1, 0) {
+		return true
+	}
+	g.lockPiece()
+	g.clearLines()
+	g.spawnRandomPiece()
+	return false
+}
+
+func (g *GameState) hardDrop() {
+	if g.ActivePiece == nil || g.GameOver {
+		return
+	}
+	for g.movePiece(1, 0) {
+	}
+	g.lockPiece()
+	g.clearLines()
+	g.spawnRandomPiece()
+}
+
+func (g *GameState) lockPiece() bool {
+	if g.ActivePiece == nil || g.GameOver {
+		return false
+	}
+	p := g.ActivePiece
+	for _, b := range g.blocksFor(p, p.Rotation, p.Row, p.Col) {
+		if b.R >= 0 && b.R < BOARD_HEIGHT && b.C >= 0 && b.C < BOARD_WIDTH {
+			g.Board[b.R][b.C] = p.ID
+		}
+	}
+	fmt.Printf("[LOCKED] Piece locked at row=%d col=%d\n", p.Row, p.Col)
+	g.ActivePiece = nil
+	return true
+}
+
+func (g *GameState) clearLines() int {
+	cleared := 0
+	for r := BOARD_HEIGHT - 1; r >= 0; r-- {
+		full := true
+		for c := 0; c < BOARD_WIDTH; c++ {
+			if g.Board[r][c] == 0 {
+				full = false
+				break
 			}
 		}
-		fmt.Println()
+		if !full {
+			continue
+		}
+
+		// shift rows down
+		for rr := r; rr > 0; rr-- {
+			g.Board[rr] = g.Board[rr-1]
+		}
+		// clear top
+		for c := 0; c < BOARD_WIDTH; c++ {
+			g.Board[0][c] = 0
+		}
+		cleared++
+		r++ // re-check this row index after shift
 	}
-	
-	// Print the piece coordinates visually (optional)
-	fmt.Println("-----------------------------")
-	fmt.Println("Active Piece Coords:")
-	for _, coord := range g.ActivePiece.Coords {
-		fmt.Printf("  Row: %d, Col: %d\n", coord[0], coord[1])
+	if cleared > 0 {
+		fmt.Printf("[CLEARED] %d lines cleared\n", cleared)
 	}
-	fmt.Println("=============================\n")
+	return cleared
 }
 
-
-func main() {
-	fmt.Println("--- Tetris Simulation Started ---")
-	
-	// Initialize Game State
-	gameState := NewGameState()
-	
-	// Start the simulation loop
-	for turn := 1; turn <= 3; turn++ {
-		fmt.Printf("\n\n======== TURN %d ========\n", turn)
-		
-		// 1. Generate Piece
-		gameState.generateNewPiece()
-		
-		// 2. Display Initial State
-		gameState.PrintState()
-		
-		// 3. Simulate Player Actions (Movement/Rotation - Mocked)
-		fmt.Println(">>> Player moves piece (Simulated: Moving right) <<<")
-		gameState.CursorCol += 1
-		
-		// 4. Simulate Drop
-		gameState.simulateDrop()
-		
-		// 5. Check Game Over/Win Condition (Mocked)
-		fmt.Println("--- Turn simulation successful ---")
+func (g *GameState) PrintBoard() {
+	fmt.Println("=== TETRIS BOARD ===")
+	activeCells := map[Point]bool{}
+	if g.ActivePiece != nil {
+		for _, b := range g.blocksFor(g.ActivePiece, g.ActivePiece.Rotation, g.ActivePiece.Row, g.ActivePiece.Col) {
+			activeCells[b] = true
+		}
 	}
+
+	for r := 0; r < BOARD_HEIGHT; r++ {
+		line := ""
+		for c := 0; c < BOARD_WIDTH; c++ {
+			if activeCells[Point{R: r, C: c}] {
+				line += "*"
+				continue
+			}
+			if g.Board[r][c] != 0 {
+				line += fmt.Sprintf("%d", g.Board[r][c])
+			} else {
+				line += "."
+			}
+		}
+		fmt.Printf(" %s\n", line)
+	}
+	fmt.Println("====================")
+}
 	
-	fmt.Println("--- Simulation Finished ---")
+func main() {
+	rand.Seed(time.Now().UnixNano())
+	gameState := NewGameState()
+	fmt.Println("=== TETRIS GAME STARTED ===")
+	fmt.Println("Use A/D to move, Q/W to rotate, SPACE to drop\n")
+	
+	// Initial spawn
+	gameState.spawnRandomPiece()
+	gameState.PrintBoard()
+
+	// Demo: Simulate a few game cycles
+	for i := 0; i < 10 && !gameState.GameOver; i++ {
+		fmt.Printf("\n[CYCLE %d]\n", i+1)
+
+		// Simulated input: move right if possible, rotate sometimes, then soft drop.
+		_ = gameState.movePiece(0, 1)
+		if i%2 == 0 {
+			if gameState.rotatePiece() {
+				fmt.Println("[ROTATED] Piece rotated successfully")
+			} else if gameState.ActivePiece != nil {
+				fmt.Println("[NO ROTATION] Cannot rotate at this position")
+			}
+		}
+
+		_ = gameState.softDrop()
+		gameState.PrintBoard()
+	}
+
+	fmt.Println("=== GAME SIMULATION COMPLETE ===")
 }
