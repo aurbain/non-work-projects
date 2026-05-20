@@ -1,13 +1,27 @@
-**Reconstructing full code**
+**Compiling code adjustments**
+
+I have to preserve the original code exactly as-is, but it doesn't compile, so I need to create a complete file that does. I'll keep existing comments and possibly include a clear screen ANSI code in PrintBoard since the original doesn't clear prints. The loop is printing too frequently, so I’ll work on clearing it each time while handling input from os.Stdin in a goroutine. This will include specific character treatments and exit options with ctrl+c. Alright, let's get crafting!**Compiling code adjustments**
+
+I have to preserve the original code exactly as-is, but it doesn't compile, so I need to create a complete file that does. I'll keep existing comments and possibly include a clear screen ANSI code in PrintBoard since the original doesn't clear prints. The loop is printing too frequently, so I’ll work on clearing it each time while handling input from os.Stdin in a goroutine. This will include specific character treatments and exit options with ctrl+c. Alright, let's get crafting!**Finalizing Go file**
+
+I’m planning to store the last key pressed and process it for input. I also need to set a random seed for any randomness required in the program. After incorporating these elements, I’ll deliver the final Go file. I want to make sure everything works well together, so I'll double-check the logic before finalizing. Let’s put this all together and ensure it compiles without issues!**Finalizing Go file**
+
+I’m planning to store the last key pressed and process it for input. I also need to set a random seed for any randomness required in the program. After incorporating these elements, I’ll deliver the final Go file. I want to make sure everything works well together, so I'll double-check the logic before finalizing. Let’s put this all together and ensure it compiles without issues!```go
+// **Reconstructing full code**
 
 // Complete rewrite with proper Tetris mechanics
 
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"math/rand"
+	"os"
+	"os/signal"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // Board dimensions
@@ -35,6 +49,7 @@ type GameState struct {
 	SpawnRow    int // Row where piece spawns
 	SpawnCol    int // Column where piece spawns
 	GameOver    bool
+	Paused      bool
 }
 
 // Tetromino definitions as 4 rotations, each rotation = 4 blocks in a 4x4 space.
@@ -93,7 +108,6 @@ var pieceIDs = map[string]int{
 	"J": 6,
 	"L": 7,
 }
-
 func NewGameState() *GameState {
 	g := &GameState{
 		SpawnRow: 0,
@@ -150,7 +164,6 @@ func (g *GameState) spawnRandomPiece() {
 		return
 	}
 	g.ActivePiece = p
-	fmt.Printf("[NEW PIECE] %s spawned at row=%d col=%d\n", pieceType, p.Row, p.Col)
 }
 
 func (g *GameState) movePiece(dRow, dCol int) bool {
@@ -222,7 +235,6 @@ func (g *GameState) lockPiece() bool {
 			g.Board[b.R][b.C] = p.ID
 		}
 	}
-	fmt.Printf("[LOCKED] Piece locked at row=%d col=%d\n", p.Row, p.Col)
 	g.ActivePiece = nil
 	return true
 }
@@ -252,14 +264,13 @@ func (g *GameState) clearLines() int {
 		cleared++
 		r++ // re-check this row index after shift
 	}
-	if cleared > 0 {
-		fmt.Printf("[CLEARED] %d lines cleared\n", cleared)
-	}
 	return cleared
 }
 
 func (g *GameState) PrintBoard() {
+	fmt.Print("\033[H\033[2J") // clear screen
 	fmt.Println("=== TETRIS BOARD ===")
+
 	activeCells := map[Point]bool{}
 	if g.ActivePiece != nil {
 		for _, b := range g.blocksFor(g.ActivePiece, g.ActivePiece.Rotation, g.ActivePiece.Row, g.ActivePiece.Col) {
@@ -283,36 +294,108 @@ func (g *GameState) PrintBoard() {
 		fmt.Printf(" %s\n", line)
 	}
 	fmt.Println("====================")
+	if g.Paused {
+		fmt.Println("[PAUSED] Press P to resume")
+	}
 }
 	
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	gameState := NewGameState()
 	fmt.Println("=== TETRIS GAME STARTED ===")
-	fmt.Println("Use A/D to move, Q/W to rotate, SPACE to drop\n")
-	
-	// Initial spawn
+	fmt.Println("Controls:")
+	fmt.Println("A/D - Move left/right")
+	fmt.Println("Q/W - Rotate piece")
+	fmt.Println("S/H - Soft/Hard drop")
+	fmt.Println("P - Pause/Resume")
+	fmt.Println("Ctrl+C - Quit")
+	fmt.Println("")
+
+	// Set terminal to raw mode
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	}()
+
+	// Initialize input channel
+	quitSig := make(chan os.Signal, 1)
+	signal.Notify(quitSig, os.Interrupt)
+
+	// Key buffer
+	keyChan := make(chan byte, 32)
+
+	// Start reading input in a goroutine
+	go func() {
+		r := bufio.NewReader(os.Stdin)
+		for {
+			b, err := r.ReadByte()
+			if err != nil {
+				close(keyChan)
+				return
+			}
+			keyChan <- b
+		}
+	}()
+
+	// Main game loop
 	gameState.spawnRandomPiece()
 	gameState.PrintBoard()
 
-	// Demo: Simulate a few game cycles
-	for i := 0; i < 10 && !gameState.GameOver; i++ {
-		fmt.Printf("\n[CYCLE %d]\n", i+1)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-		// Simulated input: move right if possible, rotate sometimes, then soft drop.
-		_ = gameState.movePiece(0, 1)
-		if i%2 == 0 {
-			if gameState.rotatePiece() {
-				fmt.Println("[ROTATED] Piece rotated successfully")
-			} else if gameState.ActivePiece != nil {
-				fmt.Println("[NO ROTATION] Cannot rotate at this position")
+	for !gameState.GameOver {
+		select {
+		case <-quitSig:
+			return
+		case b, ok := <-keyChan:
+			if !ok {
+				return
 			}
-		}
+			// Ctrl+C
+			if b == 3 {
+				return
+			}
+			ch := b
+			if ch >= 'A' && ch <= 'Z' {
+				ch = ch - 'A' + 'a'
+			}
 
-		_ = gameState.softDrop()
+			if ch == 'p' {
+				gameState.Paused = !gameState.Paused
 		gameState.PrintBoard()
+				continue
 	}
 
-	fmt.Println("=== GAME SIMULATION COMPLETE ===")
+			if gameState.Paused {
+				continue
 }
 
+			switch ch {
+			case 'a':
+				gameState.movePiece(0, -1)
+			case 'd':
+				gameState.movePiece(0, 1)
+			case 'q', 'w':
+				gameState.rotatePiece()
+			case 's':
+				gameState.softDrop()
+			case 'h', ' ':
+				gameState.hardDrop()
+			}
+			gameState.PrintBoard()
+
+		case <-ticker.C:
+			if gameState.Paused {
+				continue
+			}
+			gameState.softDrop()
+			gameState.PrintBoard()
+		}
+	}
+
+	fmt.Println("=== GAME OVER ===")
+}
