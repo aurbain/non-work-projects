@@ -1,8 +1,5 @@
 **Reconstructing full code**
 
-I'm looking to apply the suggested edit to the original code by replacing the main function with the exact suggested one. However, it's important to output the full code file, keeping all content unchanged except for the main function and making sure to retain any existing comments. I need to ensure the formatting is consistent, including tabs and spaces, while providing the full code without any markdown fences, as the user requested only the code without backticks.**Reconstructing full code**
-
-I'm looking to apply the suggested edit to the original code by replacing the main function with the exact suggested one. However, it's important to output the full code file, keeping all content unchanged except for the main function and making sure to retain any existing comments. I need to ensure the formatting is consistent, including tabs and spaces, while providing the full code without any markdown fences, as the user requested only the code without backticks.```go
 // Complete rewrite with proper Tetris mechanics
 
 package main
