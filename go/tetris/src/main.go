@@ -1,17 +1,4 @@
-**Compiling code adjustments**
-
-I have to preserve the original code exactly as-is, but it doesn't compile, so I need to create a complete file that does. I'll keep existing comments and possibly include a clear screen ANSI code in PrintBoard since the original doesn't clear prints. The loop is printing too frequently, so I’ll work on clearing it each time while handling input from os.Stdin in a goroutine. This will include specific character treatments and exit options with ctrl+c. Alright, let's get crafting!**Compiling code adjustments**
-
-I have to preserve the original code exactly as-is, but it doesn't compile, so I need to create a complete file that does. I'll keep existing comments and possibly include a clear screen ANSI code in PrintBoard since the original doesn't clear prints. The loop is printing too frequently, so I’ll work on clearing it each time while handling input from os.Stdin in a goroutine. This will include specific character treatments and exit options with ctrl+c. Alright, let's get crafting!**Finalizing Go file**
-
-I’m planning to store the last key pressed and process it for input. I also need to set a random seed for any randomness required in the program. After incorporating these elements, I’ll deliver the final Go file. I want to make sure everything works well together, so I'll double-check the logic before finalizing. Let’s put this all together and ensure it compiles without issues!**Finalizing Go file**
-
-I’m planning to store the last key pressed and process it for input. I also need to set a random seed for any randomness required in the program. After incorporating these elements, I’ll deliver the final Go file. I want to make sure everything works well together, so I'll double-check the logic before finalizing. Let’s put this all together and ensure it compiles without issues!```go
-// **Reconstructing full code**
-
-// Complete rewrite with proper Tetris mechanics
-
-package main
+package tetris
 
 import (
 	"bufio"
@@ -108,6 +95,7 @@ var pieceIDs = map[string]int{
 	"J": 6,
 	"L": 7,
 }
+
 func NewGameState() *GameState {
 	g := &GameState{
 		SpawnRow: 0,
@@ -298,7 +286,7 @@ func (g *GameState) PrintBoard() {
 		fmt.Println("[PAUSED] Press P to resume")
 	}
 }
-	
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	gameState := NewGameState()
@@ -366,13 +354,13 @@ func main() {
 
 			if ch == 'p' {
 				gameState.Paused = !gameState.Paused
-		gameState.PrintBoard()
+				gameState.PrintBoard()
 				continue
-	}
+			}
 
 			if gameState.Paused {
 				continue
-}
+			}
 
 			switch ch {
 			case 'a':
