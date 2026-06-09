@@ -1,5 +1,8 @@
-package renderer
+**Preparing final code output**
 
+It looks like I need to provide the complete modified file based on the suggested edits. The changes are minor, like adding a whitespace line break before the `fmt.Printf` line, a tab before it, and a space after the comma in that line. I also need to ensure the entire content is formatted as Go code without using triple backticks. The user just wants the code, so let’s craft the final file accordingly!**Preparing final code output**
+
+It looks like I need to provide the complete modified file based on the suggested edits. The changes are minor, like adding a whitespace line break before the `fmt.Printf` line, a tab before it, and a space after the comma in that line. I also need to ensure the entire content is formatted as Go code without using triple backticks. The user just wants the code, so let’s craft the final file accordingly!package renderer
 import (
 	"fmt"
 	"github.com/aaron/tetris/game_state"
@@ -39,6 +42,7 @@ func (r *Renderer) DrawBoard(gameState *game_state.GameState) {
 		fmt.Printf(" %s\n", line)
 	}
 	fmt.Println("=====================")
+
 	fmt.Printf("Score: %d | Level: %d | Lines: %d\n",
 		gameState.Score, gameState.Level, gameState.LinesCleared)
 }
