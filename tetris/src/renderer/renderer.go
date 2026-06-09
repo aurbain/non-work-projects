@@ -1,51 +1,20 @@
 TOOL_NAME: edit_existing_file
 BEGIN_ARG: filepath
-"tetris/src/renderer/renderer.go"
+"tetris/src/input/input.go"
 END_ARG
 BEGIN_ARG: changes
-"package renderer
+"package input
 
 import (
-	\"fmt\"
-	\"github.com/aaron/tetris/game_state\"
+	\"bufio\"
+	\"os\"
 )
 
-type Renderer struct{}
+type InputEvent int
 
-func New() *Renderer {
-	return &Renderer{}
-}
-
-func (r *Renderer) ClearScreen() {
-	fmt.Printf(`[2J`) // Clear entire screen
-	fmt.Printf(`[H`) // Move cursor to top-left
-}
-
-func (r *Renderer) DrawBoard(gameState *game_state.GameState) {
-	activeCells := make(map[game_state.Point]bool)
-	if gameState.ActivePiece != nil {
-		for _, b := range gameState.blocksFor(gameState.ActivePiece, gameState.ActivePiece.Rotation, gameState.ActivePiece.Row, gameState.ActivePiece.Col) {
-			activeCells[b] = true
-		}
-	}
-
-	fmt.Println(\"=== TETRIS BOARD ===\")
-	for r := 0; r < len(gameState.Board); r++ {
-		line := \"\"
-		for c := 0; c < len(gameState.Board[r]); c++ {
-			if activeCells[game_state.Point{r, c}] {
-				line += \"*\"
-			} else if gameState.Board[r][c] != 0 {
-				line += fmt.Sprintf(\"%d\", gameState.Board[r][c])
-			} else {
-				line += \".\"
-			}
-		}
-		fmt.Printf(\" %s\\n\", line)
-	}
-	fmt.Println(\"=====================\")
-	fmt.Printf(\"Score: %d | Level: %d | Lines: %d\\n\", 
-		gameState.Score, gameState.Level, gameState.LinesCleared)
-}
-"
-END_ARG
+const (
+	MoveLeft InputEvent = iota
+	MoveRight
+	Rotate
+	SoftDrop
+	HardDrop
