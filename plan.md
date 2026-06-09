@@ -1,28 +1,45 @@
-# Tetris Game Plan
+package renderer
 
-## Phase 1: Project Structure and Foundation
-1. **Fix Module Configuration**: Update `go.mod` to ensure the module path matches the imports used in the code (e.g., `github.com/aaron/tetris`).
-2. **Reorganize Project Structure**:
-    * Create the `tetris/src/game_state` directory.
-    * Cleanup `tetris/src/main.go` (it seems to contain redundant or misplaced code).
-3. **Define Game State**: Implement the core game logic in `tetris/src/game_state/game_state.go`, including:
-    * Board representation (2D grid).
-    * Piece definitions (Tetrominoes) and rotations.
-    * Movement logic (left, right, down, hard drop).
-    * Rotation logic (checking for collisions).
-    * Line clearing and scoring.
-    * Game over conditions.
+import (
+	"fmt"
+	"github.com/aaron/tetris/game_state"
+)
 
-## Phase 2: Input and Rendering
-4. **Implement Input Handling**: Refine `tetris/src/input/input.go` to correctly capture key presses from the terminal and communicate them to the game state.
-5. **Implement Rendering**: Complete `tetris/src/renderer/renderer.go` to:
-    * Clear the terminal screen.
-    * Draw the board and the current active piece.
-    * Display scores and levels.
-6. **Integrate Main Loop**: Refine `tetris/src/main/main.go` to orchestrate the game loop:
-    * Initialize game state, input, and renderer.
-    * Run a loop that handles timing (gravity), processes input, updates the game state, and renders the frame.
+type Renderer struct{}
 
-## Phase 3: Polish and Testing
-7. **Refine Gameplay Mechanics**: Adjust gravity speed based on the level, add "soft drop" mechanics, and ensure smooth piece movement.
-8. **Final Cleanup**: Remove any remaining temporary or broken files.
+func New() *Renderer {
+	return &Renderer{}
+}
+
+func (r *Renderer) ClearScreen() {
+	fmt.Printf(`[2J`) // Clear entire screen
+	fmt.Printf(`[H`) // Move cursor to top-left
+}
+
+func (r *Renderer) DrawBoard(gameState *game_state.GameState) {
+	activeCells := make(map[game_state.Point]bool)
+	if gameState.ActivePiece != nil {
+		for _, b := range gameState.blocksFor(gameState.ActivePiece, gameState.ActivePiece.Rotation, gameState.ActivePiece.Row, gameState.ActivePiece.Col) {
+			activeCells[b] = true
+		}
+	}
+
+	fmt.Println("=== TETRIS BOARD ===")
+	for r := 0; r < len(gameState.Board); r++ {
+		line := ""
+		for c := 0; c < len(gameState.Board[r]); c++ {
+			if activeCells[game_state.Point{r, c}] {
+				line += "*"
+			} else if gameState.Board[r][c] != 0 {
+				line += fmt.Sprintf("%d", gameState.Board[r][c])
+			} else {
+				line += "."
+			}
+		}
+		fmt.Printf(" %s\n", line)
+	}
+	fmt.Println("=====================")
+	fmt.Printf("Score: %d | Level: %d | Lines: %d\n",
+		gameState.Score, gameState.Level, gameState.LinesCleared)
+}
+
