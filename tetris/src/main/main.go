@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/aaron/tetris/game_state"
-	"github.com/aaron/tetris/input"
-	"github.com/aaron/tetris/renderer"
+    "github.com/aaron/tetris/src/game_state"
+    "github.com/aaron/tetris/src/input"
+    "github.com/aaron/tetris/src/renderer"
+
 )
 
 func main() {
@@ -17,6 +18,7 @@ func main() {
 	 fmt.Println("P - Pause/Resume")
 	
 	 gameState := game_state.NewGameState()
-	 input.Setup()
-	 renderer.Start(gameState)
+keyCh := make(chan input.KeyState)
+	input.Setup(keyCh)
+	renderer.Start(gameState, keyCh)
 }

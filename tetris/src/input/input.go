@@ -1,33 +1,42 @@
 package input
 
 import (
-	"rune"
+    "bufio"
+    "os"
+
+    "github.com/aaron/tetris/src/game_state"
 )
 
-func Setup() {
-	rune.Listen(rune.Config{Runes: rune.Runes})
+type KeyState struct {
+    Key     rune
+    Pressed bool
 }
 
-func HandleKey(gameState *game_state.GameState, key rune.KeyState) {
-	switch key.Key {
-	case rune.Key('a'):
-		if !key.Pressed { continue }
-		 gameState.movePiece(-1, 0)
-	case rune.Key('d'):
-		if !key.Pressed { continue }
-		gameState.movePiece(1, 0)
-	case rune.Key('q'), rune.Key('w'):
-		if !key.Pressed { continue }
-		 if gameState.rotatePiece() {
-			 fmt.Printf("[ROTATED] Piece rotated successfully\n")
-		 } else if gameState.ActivePiece != nil {
-			 fmt.Println("[NO ROTATION] Cannot rotate at this position")
-		 }
-	case rune.Key('s'):
-		if !key.Pressed { continue }
-		gameState.softDrop()
-	case rune.Key('h'):
-		if !key.Pressed { continue }
-		gameState.hardDrop()
-	}
+// keyMap maps input characters to game actions.
+var keyMap = map[rune]func(*game_state.GameState){
+    'a': func(gs *game_state.GameState) { gs.MovePiece(-1, 0) },
+    'd': func(gs *game_state.GameState) { gs.MovePiece(1, 0) },
+    'q': func(gs *game_state.GameState) { gs.RotatePiece() },
+    'w': func(gs *game_state.GameState) { gs.rotatePiece() },
+    's': func(gs *game_state.GameState) { gs.softDrop() },
+    'h': func(gs *game_state.GameState) { gs.hardDrop() },
+}
+
+// Setup starts a goroutine that reads stdin and sends key events.
+func Setup(ch chan<- KeyState) {
+    go func() {
+        reader := bufio.NewReader(os.Stdin)
+        for {
+            b, err := reader.ReadByte()
+            if err != nil { continue }
+            ch <- KeyState{Key: rune(b), Pressed: true}
+        }
+    }()
+}
+
+// HandleKey processes a single key event.
+func HandleKey(gs *game_state.GameState, ks KeyState) {
+    if fn, ok := keyMap[ks.Key]; ok {
+        fn(gs)
+    }
 }

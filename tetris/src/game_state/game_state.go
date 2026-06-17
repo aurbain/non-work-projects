@@ -103,7 +103,7 @@ func (g *GameState) isValidMove(row, col int, shape [][]int) bool {
 }
 
 // movePiece attempts to move the active piece.
-func (g *GameState) movePiece(dr, dc int) bool {
+func (g *GameState) MovePiece(dr, dc int) bool {
 	if g.ActivePiece == nil || g.GameOver || g.Paused {
 		return false
 	}
@@ -120,7 +120,7 @@ func (g *GameState) movePiece(dr, dc int) bool {
 }
 
 // rotatePiece attempts to rotate the active piece.
-func (g *GameState) rotatePiece() bool {
+func (g *GameState) RotatePiece() bool {
 	if g.ActivePiece == nil || g.GameOver || g.Paused {
 		return false
 	}
@@ -149,8 +149,8 @@ func (g *GameState) rotatePiece() bool {
 }
 
 // softDrop moves the piece down by one step.
-func (g *GameState) softDrop() bool {
-	if g.movePiece(1, 0) {
+func (g *GameState) SoftDrop() bool {
+	if g.MovePiece(1, 0) {
 		return true
 	}
 	g.lockPiece()
@@ -158,7 +158,7 @@ func (g *GameState) softDrop() bool {
 }
 
 // hardDrop moves the piece to the bottom immediately.
-func (g *GameState) hardDrop() {
+func (g *GameState) HardDrop() {
 	if g.ActivePiece == nil || g.GameOver || g.Paused {
 		return
 	}
