@@ -1,1 +1,7 @@
 __pycache__/test_google_doc.cpython-314.pyc
+gcp-play/terraform.tfstate.backup
+gcp-play/terraform.tfstate
+gcp-play/.terraform.lock.hcl
+tcp-play/.terraform/providers
+
+gcp-play/.terraform/providers/registry.terraform.io/hashicorp/google/7.37.0/darwin_amd64/terraform-provider-google_v7.37.0_x5

@@ -1,0 +1,6 @@
+project_id     = "first-gcp-instance"
+region            = "us-central1"
+network           = "default"
+machine_type      = "e2-medium"
+zone              = "us-central1-a"
+image_family      = "ubuntu-2404-lts-amd64"
