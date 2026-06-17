@@ -1,3 +1,4 @@
+import sys
 import requests
 from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
@@ -257,8 +258,11 @@ def print_unicode_grid_from_google_doc(doc_url: str) -> None:
 
 
 if __name__ == "__main__":
-    # Example usage
-    url = "https://docs.google.com/document/d/e/2PACX-1vSvM5gDlNvt7npYHhp_XfsJvuntUhq184By5xO_pA4b_gCWeXb6dM6ZxwN8rE6S4ghUsCj2VKR21oEP/pub"
+    if len(sys.argv) < 2:
+        print("Usage: python3 test_google_doc.py <URL>")
+        sys.exit(1)
+
+    url = sys.argv[1]
 
     try:
         print("=" * 60)
