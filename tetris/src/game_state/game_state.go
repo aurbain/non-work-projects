@@ -11,7 +11,7 @@ type Point struct {
 	Row, Col int
 }
 
-// Piece represents the currently active tetromino.
+// Piece represents a tetromino piece.
 type Piece struct {
 	Shape    [][]int
 	Row      int
@@ -23,6 +23,7 @@ type Piece struct {
 type GameState struct {
 	Board         [][]int
 	ActivePiece   *Piece
+	NextPiece     *Piece
 	Score         int
 	Level         int
 	LinesCleared  int
@@ -33,13 +34,13 @@ type GameState struct {
 
 // Shapes defines the standard Tetris tetromino shapes.
 var Shapes = [][][]int{
-	{{1, 1}, {1, 1}},             // O (Square)
-	{{1, 1, 1, 1}},                // I (Line)
-	{{0, 1, 0}, {1, 1, 1}},        // T
-	{{0, 1, 1}, {1, 1, 0}},        // S
-	{{1, 1, 0}, {0, 1, 1}},        // Z
-	{{1, 1, 1}, {0, 1, 0}},        // J
-	{{1, 1, 1}, {1, 0, 0}},        // L
+	{{1, 1, 1, 1}},                // I (Line) - index 0
+	{{1, 1}, {1, 1}},              // O (Square) - index 1
+	{{0, 1, 0}, {1, 1, 1}},        // T - index 2
+	{{0, 1, 1}, {1, 1, 0}},        // S - index 3
+	{{1, 1, 0}, {0, 1, 1}},        // Z - index 4
+	{{1, 1, 1}, {0, 1, 0}},        // J - index 5
+	{{1, 1, 1}, {1, 0, 0}},        // L - index 6
 }
 
 // NewGameState initializes a new game state.
@@ -78,13 +79,22 @@ func (g *GameState) spawnRandomPiece() {
 		Rotation: 0,
 	}
 
-	if !g.isValidMove(g.ActivePiece.Row, g.ActivePiece.Col, g.ActivePiece.Shape) {
+	if !g.IsValidMove(g.ActivePiece.Row, g.ActivePiece.Col, g.ActivePiece.Shape) {
 		g.GameOver = true
+	}
+
+	// Generate next piece
+	g.NextPiece = &Piece{
+		Shape:    Shapes[rand.Intn(len(Shapes))],
+		Row:      0,
+		Col:      4 - (len(Shapes[rand.Intn(len(Shapes))][0]) / 2),
+		Rotation: 0,
 	}
 }
 
 // isValidMove checks if a piece can be placed at the given row and col.
-func (g *GameState) isValidMove(row, col int, shape [][]int) bool {
+// Note: Exposed for testing purposes
+func (g *GameState) IsValidMove(row, col int, shape [][]int) bool {
 	for r, rowCells := range shape {
 		for c, cell := range rowCells {
 			if cell != 0 {
@@ -111,7 +121,7 @@ func (g *GameState) MovePiece(dr, dc int) bool {
 	newRow := g.ActivePiece.Row + dr
 	newCol := g.ActivePiece.Col + dc
 
-	if g.isValidMove(newRow, newCol, g.ActivePiece.Shape) {
+	if g.IsValidMove(newRow, newCol, g.ActivePiece.Shape) {
 		g.ActivePiece.Row = newRow
 		g.ActivePiece.Col = newCol
 		return true
@@ -140,7 +150,7 @@ func (g *GameState) RotatePiece() bool {
 	}
 
 	// Check if rotation is valid
-	if g.isValidMove(g.ActivePiece.Row, g.ActivePiece.Col, newShape) {
+	if g.IsValidMove(g.ActivePiece.Row, g.ActivePiece.Col, newShape) {
 		g.ActivePiece.Shape = newShape
 		g.ActivePiece.Rotation++
 		return true
@@ -148,28 +158,30 @@ func (g *GameState) RotatePiece() bool {
 	return false
 }
 
-// softDrop moves the piece down by one step.
+// SoftDrop moves the piece down by one step and resets the gravity timer.
+// Note: Exposed for testing purposes
 func (g *GameState) SoftDrop() bool {
 	if g.MovePiece(1, 0) {
+		g.LastDropTime = time.Now()
 		return true
 	}
-	g.lockPiece()
-	return true
+	return false
 }
 
-// hardDrop moves the piece to the bottom immediately.
+// HardDrop moves the piece to the bottom immediately.
 func (g *GameState) HardDrop() {
 	if g.ActivePiece == nil || g.GameOver || g.Paused {
 		return
 	}
-	for g.isValidMove(g.ActivePiece.Row+1, g.ActivePiece.Col, g.ActivePiece.Shape) {
+	for g.IsValidMove(g.ActivePiece.Row+1, g.ActivePiece.Col, g.ActivePiece.Shape) {
 		g.ActivePiece.Row++
 	}
-	g.lockPiece()
+	g.LastDropTime = time.Now()
+	g.LockPiece()
 }
 
-// lockPiece fixes the piece to the board.
-func (g *GameState) lockPiece() {
+// LockPiece fixes the piece to the board.
+func (g *GameState) LockPiece() {
 	if g.ActivePiece == nil {
 		return
 	}
@@ -182,12 +194,12 @@ func (g *GameState) lockPiece() {
 		}
 	}
 
-	g.clearLines()
+	g.ClearLines()
 	g.spawnRandomPiece()
 }
 
-// clearLines removes full rows and shifts down the pieces above.
-func (g *GameState) clearLines() {
+// ClearLines removes full rows and shifts down the pieces above.
+func (g *GameState) ClearLines() {
 	linesCleared := 0
 	for r := 0; r < 20; {
 		full := true
@@ -216,9 +228,39 @@ func (g *GameState) clearLines() {
 	if linesCleared > 0 {
 		g.LinesCleared += linesCleared
 		g.Score += linesCleared * 100 * g.Level
-		if g.LinesCleared/10 > g.Level-1 {
+		if g.LinesCleared/10 >= g.Level {
 			g.Level++
 		}
+	}
+}
+
+// GetGhostRow returns the row where the ghost piece would land.
+func (g *GameState) GetGhostRow() int {
+	if g.ActivePiece == nil || g.GameOver || g.Paused {
+		return 0
+	}
+
+	ghostRow := g.ActivePiece.Row
+	for g.IsValidMove(ghostRow+1, g.ActivePiece.Col, g.ActivePiece.Shape) {
+		ghostRow++
+	}
+	return ghostRow
+}
+
+// DrainDrop handles automatic piece gravity.
+// Moves the piece down only if enough time has passed since last drop.
+func (g *GameState) DrainDrop() {
+	if g.ActivePiece == nil || g.GameOver || g.Paused {
+		return
+	}
+
+	now := time.Now()
+	elapsed := now.Sub(g.LastDropTime)
+
+	// Drop every 500ms
+	if elapsed >= 500*time.Millisecond {
+		g.MovePiece(1, 0)
+		g.LastDropTime = now
 	}
 }
 
@@ -259,6 +301,41 @@ func (g *GameState) PrintBoard() {
 	fmt.Printf("Score: %d | Level: %d | Lines: %d\n", g.Score, g.Level, g.LinesCleared)
 	if g.GameOver {
 		fmt.Println("GAME OVER!")
+	}
+
+	// Print next piece preview
+	if g.NextPiece != nil {
+		fmt.Println("\nNext Piece:")
+		for _, rowCells := range g.NextPiece.Shape {
+			fmt.Print("  ")
+			for _, cell := range rowCells {
+				if cell != 0 {
+					fmt.Print("X")
+				} else {
+					fmt.Print(".")
+				}
+			}
+			fmt.Println()
+		}
+	}
+
+	// Print ghost piece indicator
+	if g.ActivePiece != nil && !g.GameOver {
+		ghostRow := g.GetGhostRow()
+		if ghostRow != g.ActivePiece.Row {
+			fmt.Println("\nGhost Piece Position:")
+			for r, rowCells := range g.ActivePiece.Shape {
+				fmt.Print("  ")
+				for _, cell := range rowCells {
+					if cell != 0 && g.ActivePiece.Row+r == ghostRow {
+						fmt.Print("G")
+					} else {
+						fmt.Print(".")
+					}
+				}
+				fmt.Println()
+			}
+		}
 	}
 }
 
