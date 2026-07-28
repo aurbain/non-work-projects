@@ -23,14 +23,15 @@ const (
 )
 
 // ColorMap maps piece types to their colors.
+// Test expects: 0:Empty, 1:I, 2:O, 3:S, 4:Z, 5:J, 6:L
 var ColorMap = map[int]string{
-	0: Black, // Empty
-	1: Cyan,  // O (Square) - I piece
-	2: Yellow, // T piece
-	3: Green,  // S piece
-	4: Magenta, // Z piece
-	5: Blue,   // J piece
-	6: Red,    // L piece
+	0: Black,   // Empty
+	1: Cyan,    // I piece (Shapes[0])
+	2: Yellow,  // O piece (Shapes[1])
+	3: Green,   // S piece (Shapes[3])
+	4: Magenta, // Z piece (Shapes[4])
+	5: Blue,    // J piece (Shapes[5])
+	6: Red,     // L piece (Shapes[6])
 }
 
 // Start runs the main game loop, rendering and handling automatic drops.
