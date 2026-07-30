@@ -1,5 +1,3 @@
 module github.com/aaron/tetris
 
-go 1.26.3
-
-require github.com/stretchr/testify v1.11.1 // indirect
+go 1.26.5

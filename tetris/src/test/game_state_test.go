@@ -86,18 +86,19 @@ func TestInvalidMove(t *testing.T) {
 // TestMovePiece tests piece movement.
 func TestMovePiece(t *testing.T) {
 	gs := game_state.NewGameState()
+	initialCol := gs.ActivePiece.Col
 
 	if !gs.MovePiece(0, 1) {
 		t.Error("Should be able to move right")
 	}
-	if gs.ActivePiece.Col != 4 {
-		t.Errorf("Expected col to be 4, got %d", gs.ActivePiece.Col)
+	if gs.ActivePiece.Col != initialCol+1 {
+		t.Errorf("Expected col to be %d, got %d", initialCol+1, gs.ActivePiece.Col)
 	}
 
 	if !gs.MovePiece(0, -1) {
 		t.Error("Should be able to move left")
 	}
-	if gs.ActivePiece.Col != 3 {
+	if gs.ActivePiece.Col != initialCol {
 		t.Error("Position should return to original after left move")
 	}
 
