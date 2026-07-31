@@ -27,7 +27,7 @@ func TestSetup(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		done <- true
 	}()
-	go input.Setup(nil)
+	go input.Setup(nil, 150*time.Millisecond)
 	<-done
 }
 

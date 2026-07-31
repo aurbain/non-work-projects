@@ -13,23 +13,27 @@ type Point struct {
 
 // Piece represents a tetromino piece.
 type Piece struct {
-	Shape    [][]int
-	Row      int
-	Col      int
-	Rotation int
+	Shape         [][]int
+	Row           int
+	Col           int
+	Rotation      int
+	ShapeHeight   int
+	ShapeWidth    int
 }
 
 // GameState maintains the state of the Tetris game.
 type GameState struct {
-	Board         [][]int
-	ActivePiece   *Piece
-	NextPiece     *Piece
-	Score         int
-	Level         int
-	LinesCleared  int
-	GameOver      bool
-	Paused        bool
-	LastDropTime  time.Time
+	Board             [][]int
+	ActivePiece       *Piece
+	NextPiece         *Piece
+	Score             int
+	Level             int
+	LinesCleared      int
+	LinesClearedSinceLastLevelUp int
+	GameOver          bool
+	Paused            bool
+	LastDropTime      time.Time
+	seed              int64
 }
 
 // Shapes defines the standard Tetris tetromino shapes.
@@ -45,26 +49,37 @@ var Shapes = [][][]int{
 
 // NewGameState initializes a new game state.
 func NewGameState() *GameState {
-	rand.Seed(time.Now().UnixNano())
 	board := make([][]int, 20)
 	for i := range board {
 		board[i] = make([]int, 10)
 	}
 
+	// Use a random seed to ensure unique game instances
+	seed := int64(time.Now().UnixNano())
+
 	gs := &GameState{
-		Board:        board,
-		Score:        0,
-		Level:        1,
-		LinesCleared: 0,
-		LastDropTime: time.Now(),
+		Board:             board,
+		Score:             0,
+		Level:             1,
+		LinesCleared:      0,
+		LinesClearedSinceLastLevelUp: 0,
+		LastDropTime:      time.Now(),
+		seed:              seed,
 	}
 	gs.spawnRandomPiece()
 	return gs
 }
 
+// SeededRand returns a seeded random source for this game state.
+func (g *GameState) SeededRand() *rand.Rand {
+	return rand.New(rand.NewSource(g.seed))
+}
+
 // spawnRandomPiece spawns a new piece at the top center.
 func (g *GameState) spawnRandomPiece() {
-	shape := Shapes[rand.Intn(len(Shapes))]
+	random := g.SeededRand()
+	randomShapeIndex := random.Intn(len(Shapes))
+	shape := Shapes[randomShapeIndex]
 	// Deep copy the shape to avoid modifying the original
 	newShape := make([][]int, len(shape))
 	for i := range shape {
@@ -72,11 +87,23 @@ func (g *GameState) spawnRandomPiece() {
 		copy(newShape[i], shape[i])
 	}
 
+	// Calculate width from first non-empty row to handle all valid shapes
+	width := 0
+	height := 0
+	for _, row := range shape {
+		if width < len(row) {
+			width = len(row)
+		}
+		height = len(shape)
+	}
+
 	g.ActivePiece = &Piece{
-		Shape:    newShape,
-		Row:      0,
-		Col:      4 - (len(newShape[0]) / 2),
-		Rotation: 0,
+		Shape:        newShape,
+		Row:          0,
+		Col:          4 - (width / 2),
+		Rotation:     0,
+		ShapeHeight:  height,
+		ShapeWidth:   width,
 	}
 
 	if !g.IsValidMove(g.ActivePiece.Row, g.ActivePiece.Col, g.ActivePiece.Shape) {
@@ -84,11 +111,26 @@ func (g *GameState) spawnRandomPiece() {
 	}
 
 	// Generate next piece
+	nextRandom := g.SeededRand()
+	nextRandomShapeIndex := nextRandom.Intn(len(Shapes))
+	
+	// Calculate dimensions for next piece
+	nextShape := Shapes[nextRandomShapeIndex]
+	nextHeight := len(nextShape)
+	nextWidth := 0
+	for _, row := range nextShape {
+		if nextWidth < len(row) {
+			nextWidth = len(row)
+		}
+	}
+	
 	g.NextPiece = &Piece{
-		Shape:    Shapes[rand.Intn(len(Shapes))],
-		Row:      0,
-		Col:      4 - (len(Shapes[rand.Intn(len(Shapes))][0]) / 2),
-		Rotation: 0,
+		Shape:        Shapes[nextRandomShapeIndex],
+		Row:          0,
+		Col:          4 - (nextWidth / 2),
+		Rotation:     0,
+		ShapeHeight:  nextHeight,
+		ShapeWidth:   nextWidth,
 	}
 }
 
@@ -149,12 +191,34 @@ func (g *GameState) RotatePiece() bool {
 		}
 	}
 
-	// Check if rotation is valid
+	// Check if rotation is valid, including basic wall kicks (offsets)
 	if g.IsValidMove(g.ActivePiece.Row, g.ActivePiece.Col, newShape) {
+		// Primary spot works
 		g.ActivePiece.Shape = newShape
 		g.ActivePiece.Rotation++
 		return true
 	}
+
+	// Basic Wall Kick attempts (offsets: relative to original center)
+	// Offsets tested: 0,0 (already checked), and +/-1 horizontally
+	offsets := [][]int{{0, -1}, {0, 1}}
+
+	for _, offset := range offsets {
+		newRow := g.ActivePiece.Row + offset[0]
+		newCol := g.ActivePiece.Col + offset[1]
+
+		if g.IsValidMove(newRow, newCol, newShape) {
+			// Kick successful! Apply the rotation and the shift.
+			g.ActivePiece.Shape = newShape
+			// Update dimensions after rotation (width/height swap)
+			g.ActivePiece.ShapeHeight, g.ActivePiece.ShapeWidth = g.ActivePiece.ShapeWidth, g.ActivePiece.ShapeHeight
+			g.ActivePiece.Col += offset[1] // Apply the kick shift
+			g.ActivePiece.Rotation++
+			return true
+		}
+	}
+
+	// Rotation failed even with wall kicks
 	return false
 }
 
@@ -228,8 +292,12 @@ func (g *GameState) ClearLines() {
 	if linesCleared > 0 {
 		g.LinesCleared += linesCleared
 		g.Score += linesCleared * 100 * g.Level
-		if g.LinesCleared/10 >= g.Level {
+		g.LinesClearedSinceLastLevelUp += linesCleared
+		
+		// Check for level up (every 10 lines cleared since last level up)
+		for g.LinesClearedSinceLastLevelUp >= 10 {
 			g.Level++
+			g.LinesClearedSinceLastLevelUp -= 10
 		}
 	}
 }
@@ -267,26 +335,38 @@ func (g *GameState) DrainDrop() {
 // PrintBoard prints the current game board to the console.
 func (g *GameState) PrintBoard() {
 	fmt.Println("=== TETRIS BOARD ===")
+	
+	// Pre-calculate active piece cell positions for O(1) lookup
+	var activePieceCells [100]struct{row, col int}
+	activePieceCellCount := 0
+	if g.ActivePiece != nil {
+		for pr, rowCells := range g.ActivePiece.Shape {
+			for pc, cell := range rowCells {
+				if cell != 0 {
+					activePieceCells[activePieceCellCount] = struct{row, col int}{
+						row: g.ActivePiece.Row + pr,
+						col: g.ActivePiece.Col + pc,
+					}
+					activePieceCellCount++
+				}
+			}
+		}
+	}
+
 	for r := 0; r < 20; r++ {
 		fmt.Print("|")
 		for c := 0; c < 10; c++ {
-			if g.ActivePiece != nil {
-				isPiece := false
-				for pr, rowCells := range g.ActivePiece.Shape {
-					for pc, cell := range rowCells {
-						if cell != 0 && g.ActivePiece.Row+pr == r && g.ActivePiece.Col+pc == c {
-							isPiece = true
-							break
-						}
-					}
-					if isPiece {
-						break
-					}
+			// Check if this cell belongs to the active piece (O(1) lookup)
+			isPiece := false
+			for i := 0; i < activePieceCellCount; i++ {
+				if activePieceCells[i].row == r && activePieceCells[i].col == c {
+					isPiece = true
+					break
 				}
-				if isPiece {
-					fmt.Print("X")
-					continue
-				}
+			}
+			if isPiece {
+				fmt.Print("X")
+				continue
 			}
 
 			if g.Board[r][c] != 0 {
@@ -324,10 +404,10 @@ func (g *GameState) PrintBoard() {
 		ghostRow := g.GetGhostRow()
 		if ghostRow != g.ActivePiece.Row {
 			fmt.Println("\nGhost Piece Position:")
-			for r, rowCells := range g.ActivePiece.Shape {
+			for _, rowCells := range g.ActivePiece.Shape {
 				fmt.Print("  ")
-				for _, cell := range rowCells {
-					if cell != 0 && g.ActivePiece.Row+r == ghostRow {
+				for pc, cell := range rowCells {
+					if cell != 0 && g.ActivePiece.Row+ghostRow == g.ActivePiece.Row+pc {
 						fmt.Print("G")
 					} else {
 						fmt.Print(".")
@@ -342,4 +422,20 @@ func (g *GameState) PrintBoard() {
 // GameOver returns true if the game is over.
 func (g *GameState) IsGameOver() bool {
 	return g.GameOver
+}
+
+// Reset resets the game to initial state (but keeps the board and pieces for pause/restart scenarios)
+func (g *GameState) Reset() {
+	g.Score = 0
+	g.Level = 1
+	g.LinesCleared = 0
+	g.LinesClearedSinceLastLevelUp = 0
+	g.GameOver = false
+	g.Paused = false
+	g.LastDropTime = time.Now()
+}
+
+// Restart creates a completely new game state
+func (g *GameState) Restart() *GameState {
+	return NewGameState()
 }

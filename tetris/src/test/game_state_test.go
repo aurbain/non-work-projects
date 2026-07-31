@@ -134,12 +134,17 @@ func TestRotatePieceBlocked(t *testing.T) {
 	gs.Board[7][0] = 1
 	gs.Board[8][0] = 1
 
-	// Rotation should be blocked by the existing pieces
-	if gs.RotatePiece() {
-		t.Error("Should not rotate when blocked by existing piece")
+	// With wall kick enabled, rotation should succeed by shifting to column 1
+	// where there is no collision
+	if !gs.RotatePiece() {
+		t.Error("Should be able to rotate with wall kick to adjacent column")
 	}
-	if gs.ActivePiece.Rotation != 0 {
-		t.Error("Rotation should not change")
+	if gs.ActivePiece.Rotation != 1 {
+		t.Errorf("Expected rotation to be 1, got %d", gs.ActivePiece.Rotation)
+	}
+	// Verify the wall kick moved the piece
+	if gs.ActivePiece.Col != 1 {
+		t.Errorf("Expected piece to be kicked to col 1 (wall kick), got %d", gs.ActivePiece.Col)
 	}
 }
 
