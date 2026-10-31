@@ -15,14 +15,22 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 HOME = os.path.expanduser("~")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.environ.get("ALERTER_ROOT", "/Volumes/aaron/SecuritySpy_secondary")
+_ROOT_CANDIDATES = [
+    os.environ.get("ALERTER_ROOT"),
+    "/Volumes/SecuritySpy",                      # dev Mac mount of the live share
+    "/Volumes/securityspy",
+    os.path.expanduser("~/Volumes/securityspy"),  # kahuna mount (\/Volumes is protected there)
+    "/Volumes/aaron/SecuritySpy_secondary",       # stale former target, last resort
+]
+ROOT = next((p for p in _ROOT_CANDIDATES if p and os.path.isdir(p)), "")
 STATE_PATH = os.environ.get("ALERTER_STATE", os.path.join(PROJECT_DIR, "state.json"))
 LOG_PATH = os.environ.get("ALERTER_LOG", os.path.join(PROJECT_DIR, "alerts.log"))
 SCENE_PATH = os.environ.get("ALERTER_SCENE", os.path.join(PROJECT_DIR, "scene.json"))
@@ -96,12 +104,27 @@ def load_feedback():
     fb = load_json(FEEDBACK_PATH, {})
     fb.setdefault("marks", {})
     fb.setdefault("examples", [])
+    fb.setdefault("overrides", {})
+    fb.setdefault("learn_mode", False)
     return fb
 
 
 def save_feedback(fb):
     # type: (Dict) -> None
     save_json(FEEDBACK_PATH, fb)
+
+
+FB_LOCK = threading.Lock()
+
+
+def update_feedback(mutate):
+    # type: (Callable[[Dict], Any]) -> Any
+    """Serialized load -> mutate -> save of feedback.json for threaded callers (review server)."""
+    with FB_LOCK:
+        fb = load_feedback()
+        out = mutate(fb)
+        save_feedback(fb)
+    return out
 
 
 def rid(s):
@@ -704,6 +727,28 @@ def mark_feedback(fb, state, clip_substr, label, note):
     return matches
 
 
+def reeval_clip(rel):
+    # type: (str) -> Tuple[str, str]
+    """Re-run the VLM on one clip with the CURRENT scene map + owner corrections.
+    Bypasses dedupe/thumbnail-skip (a manual re-eval always re-analyzes). Stores the
+    result as a feedback override + refreshes the knowledge base. Returns (status, msg)."""
+    video = os.path.join(ROOT, rel)
+    camera = rel.split("/")[0]
+    when = clip_start_time(rel.split("/")[-1])
+    if not os.path.isfile(video):
+        return "error", "clip file missing on disk"
+    examples = load_feedback()["examples"]
+    prompt = build_prompt(camera, when, load_scenes(), examples)
+    ex_imgs = kb_example_images(examples)
+    thm = decode_thm_jpeg(thm_path(video))
+    frames = sample_frames(video, count=3)
+    status, msg = llm_analyze(frames, prompt, False, ex_imgs)
+    kb_store_clip(rel, when, camera, status, msg, thm, frames)
+    update_feedback(lambda fb: fb.setdefault("overrides", {}).__setitem__(
+        rel, {"status": status, "msg": msg, "at": time.time()}))
+    return status, msg
+
+
 def wait_for_next_cycle(interval):
     # type: (float) -> None
     """Sleep until the next poll — or until a review lands, so learning applies immediately."""
@@ -761,6 +806,8 @@ def main():
         return 1
 
     state = load_state()
+    state["config"] = {"llm_base": LLM_BASE, "model": LLM_MODEL}  # review server inherits this
+    save_state(state)
     log("watching %s (llm=%s model=%s threshold=%.1f)" % (ROOT, "off" if args.no_llm else LLM_BASE, LLM_MODEL, DIFF_THRESHOLD))
     cameras = sorted({c[1] for c in enumerate_clips()})
     if args.learn_scene:

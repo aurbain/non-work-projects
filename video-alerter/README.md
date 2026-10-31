@@ -1,8 +1,8 @@
 # video-alerter
 
-Watches SecuritySpy clips on `/Volumes/aaron`, samples 3 frames per clip, classifies them with a local
-vision LLM, and raises a macOS notification for anything rated HIGH threat. Runs on kahuna.local or the
-dev Mac (Python 3.15, stdlib only). See `CLAUDE.md` for layout and constraints.
+Watches SecuritySpy clips on the live `securityspy` share (auto-detected mount; see CLAUDE.md), samples 3 frames
+per clip, classifies them with a local vision LLM, and raises a macOS notification for anything rated HIGH
+threat. Runs on kahuna.local or the dev Mac (Python 3.15, stdlib only). See `CLAUDE.md` for layout and constraints.
 
 ## 1. LLM server (on kahuna)
 
@@ -61,10 +61,24 @@ python3.15 review.py     # http://127.0.0.1:8765 — set ALERTER_REVIEW_HOST=0.0
 ```
 
 Per-day browse: date chips, thumbnail per clip (click to play the clip inline), status badge
-(alert/ok/skip/pending/unanalyzed), verdict text, the camera's learned scene map, and
-**false positive / real alert** buttons with an optional note — those become prompt examples
-immediately (stored in `feedback.json`, which the watcher re-reads every cycle, so no restart needed).
-CLI equivalent: `alerter.py --mark SUB --label fp --note …`.
+(alert/ok/skip/pending/unanalyzed), the alert text overlaid on the frame, the camera's learned scene map,
+and three actions per clip:
+- **false positive / real alert** — become prompt examples immediately (`feedback.json`, re-read every cycle).
+- **re-evaluate** — re-runs the VLM on that clip *with the current knowledge* (scene map + all owner
+  corrections + FP example images). Useful after you've marked a batch of FPs: re-eval an old alert and
+  watch it downgrade. Result is stored as an override in `feedback.json` (the watcher owns `state.json`,
+  so this keeps each file single-writer) and refreshes the clip's `knowledge/` record. The review server
+  inherits the LLM endpoint from `state.json["config"]`, so you don't need to export `ALERTER_LLM_BASE` twice.
+- **learn mode** (header toggle) — automatic re-evaluation of the whole corpus. When enabled, the review
+  server runs a background worker that re-judges one clip every `ALERTER_LEARN_INTERVAL` seconds
+  (default 15) with the *current* knowledge, round-robin by oldest re-eval; never-re-evaluated alerts go
+  first, and alerts rotate ~2x afterward, so fresh corrections propagate to the clips that matter soonest.
+  Results land in the same `feedback.json["overrides"]` as manual re-evals; the day view auto-refreshes
+  while the toggle is on. The flag persists in `feedback.json["learn_mode"]` (survives restarts) — turn it
+  off when the corpus has converged to stop the VLM churn. `GET /api/learn` reports progress
+  (done/fail/current clip); failures on missing files are cooled down for 30 min instead of hot-looping.
+
+CLI equivalent of marking: `alerter.py --mark SUB --label fp --note …`.
 
 ## 5. Output
 

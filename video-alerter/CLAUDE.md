@@ -12,16 +12,16 @@ kahuna has plenty of headroom, but keep the pipeline lean anyway — the capture
 
 ## Where the video files live
 
-SecuritySpy (running on `intel-macmini.local`) drops recordings into a folder on a NAS volume mounted at `/Volumes/aaron` on the analysis machines (SMB share `//aaron@TNAS(SMB)/aaron`, ~1.3 TB free).
+SecuritySpy (running on `intel-macmini.local`) records to the NAS share `//aaron@TNAS(SMB)/securityspy` — **this is the live capture root** (has every day, incl. the newest). Mounted as: `/Volumes/SecuritySpy` on the dev Mac, `~/Volumes/securityspy` on kahuna (its `/Volumes` is SIP-protected; new mounts need a home-dir mount point). The old `SecuritySpy_secondary` folder on the `aaron` share is **stale** (stopped 10-27) — kept as last-resort fallback only. `alerter.py` auto-detects the first existing root (`ALERTER_ROOT` overrides); relative clip keys (`camera/date/file.m4v`) are identical across mounts, so state carries over.
 
 Layout:
 
 ```
-/Volumes/aaron/SecuritySpy_secondary/            # SecuritySpy capture root
+<Vol>/SecuritySpy/                                # live capture root (SMB share "securityspy")
 └── amcrest outdoor bullet right/                # one dir per camera
-    ├── 2026-10-27/                              # one dir per calendar day (YYYY-MM-DD)
-    │   ├── 10-27-2026 08-56-48 M amcrest outdoor bullet right.m4v   # the recording
-    │   ├── .10-27-2026 08-56-48 M ... .thm      # hidden JPEG-ish thumbnail (~110 KB)
+    ├── 2026-10-29/                              # one dir per calendar day (YYYY-MM-DD)
+    │   ├── 10-29-2026 08-56-48 M amcrest outdoor bullet right.m4v   # the recording
+    │   ├── .10-29-2026 08-56-48 M ... .thm      # hidden JPEG-ish thumbnail (~110 KB)
     │   └── .FF_Index                            # hidden per-day index, ignore
     └── ...
 ```
@@ -62,6 +62,7 @@ Key facts:
   - `feedback.json` — marks (audit trail) + up to 100 FP corrections with normalized-thumbnail vectors for deterministic suppression.
   - Prompt injection per call: scene map + 8 newest text corrections + up to 3 FP example **images** (captioned "Owner-labeled FALSE POSITIVE …").
 - Owner corrections: `alerter.py --mark SUB --label fp --note …` or the review UI buttons (same code path; also promotes the clip's evidence into `knowledge/examples/`).
+- **File ownership invariant**: the watcher is the ONLY writer of `state.json`; the review server is the ONLY writer of `feedback.json`. Review actions (marks, re-evals) therefore write `feedback.json`, never `state.json`. A re-eval (`POST /api/reeval`, re-runs the VLM with current knowledge) stores its result in `feedback.json["overrides"][clip]`; the review UI shows the override in place of the state status. The watcher records its `config` (llm_base, model) in `state.json` at startup so the review server inherits the same endpoint.
 
 ## LLM requirements (what must be running on the analysis machine)
 
