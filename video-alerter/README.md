@@ -62,8 +62,11 @@ python3.15 review.py     # http://127.0.0.1:8765 — set ALERTER_REVIEW_HOST=0.0
 
 Per-day browse: date chips, thumbnail per clip (click to play the clip inline), status badge
 (alert/ok/skip/pending/unanalyzed), the alert text overlaid on the frame, the camera's learned scene map,
-and three actions per clip:
+and four actions per clip:
 - **false positive / real alert** — become prompt examples immediately (`feedback.json`, re-read every cycle).
+- **ignore for now** — parks the clip (audit-trail mark, hidden from the default view) *without* teaching
+  the model anything: no prompt example, no KB promotion. It stays in the learn-mode rotation, so a later
+  re-eval with fresh knowledge can still resolve it.
 - **re-evaluate** — re-runs the VLM on that clip *with the current knowledge* (scene map + all owner
   corrections + FP example images). Useful after you've marked a batch of FPs: re-eval an old alert and
   watch it downgrade. Result is stored as an override in `feedback.json` (the watcher owns `state.json`,

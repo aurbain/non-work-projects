@@ -112,8 +112,10 @@ main{padding:16px;max-width:1280px;margin:0 auto}
 .b-alert{background:#7a1f1f;color:#ffd9d9}.b-ok{background:#1f3a24;color:#b8e6c3}
 .b-skip{background:#333;color:#aaa}.b-pending,.b-unanalyzed{background:#4a3c10;color:#f0d98c}
 .b-marked{background:#2f6fed;color:#fff;margin-left:6px}
+.b-ignore{background:#3a3f47;color:#c8ccd2;margin-left:6px}
 .b-reeval{background:#4a3470;color:#e3d4ff;margin-left:6px}
 button.reeval{border-color:#6b4fa0}button.reeval:hover{background:#3a2d55}button:disabled{opacity:.5;cursor:default}
+button.ignore:hover{border-color:#7d8794}
 .markbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .markbar input{background:#0d1014;border:1px solid #2f3742;color:#e6e6e6;border-radius:6px;padding:4px 8px;flex:1;min-width:160px}
 button{background:#232932;color:#e6e6e6;border:1px solid #2f3742;border-radius:6px;padding:4px 12px;cursor:pointer}
@@ -122,7 +124,7 @@ button.fp:hover{border-color:#c0392b}button.tp:hover{border-color:#27ae60}
 </style></head><body>
 <header><h1>video-alerter</h1><span id="days"></span>
 <label><input type="checkbox" id="alertsOnly"> alerts only</label>
-<label><input type="checkbox" id="showMarked"> show reviewed</label>
+<label><input type="checkbox" id="showMarked"> show reviewed/resolved</label>
 <label style="color:#b9a5e0"><input type="checkbox" id="learnMode"> learn mode</label>
 <span id="learnStat" style="color:#b9a5e0;font-size:12px"></span>
 <span id="count" style="color:#9aa4b0"></span></header>
@@ -148,17 +150,22 @@ function render(){
   const out=document.getElementById('out');
   const only=document.getElementById('alertsOnly').checked;
   const showMarked=document.getElementById('showMarked').checked;
-  let alerts=0, todo=0;
-  data.cameras.forEach(cam=>cam.clips.forEach(c=>{if(c.status==='alert'){alerts++;if(!c.marked)todo++}}));
-  document.getElementById('count').textContent=alerts?`${alerts} alert${alerts>1?'s':''}, ${todo} awaiting review`:'no alerts';
+  let alerts=0, todo=0, resolved=0;
+  data.cameras.forEach(cam=>cam.clips.forEach(c=>{
+    if(c.reeval_at&&c.status==='ok'){resolved++;return}
+    if(c.status==='alert'){alerts++;if(!c.marked)todo++}}));
+  document.getElementById('count').textContent=(alerts?`${alerts} alert${alerts>1?'s':''}, ${todo} awaiting review`:'no alerts')
+    +(resolved?` · ${resolved} resolved by re-eval`:'');
   let html='';
   data.cameras.forEach(cam=>{
-    const clips=cam.clips.filter(c=>(!only||c.status==='alert')&&(showMarked||!c.marked));
+    // re-evaluated-and-downgraded clips are "resolved" — hidden unless show-all is on
+    const clips=cam.clips.filter(c=>(!only||c.status==='alert')&&(showMarked||!c.marked)
+                                    &&(showMarked||!(c.reeval_at&&c.status==='ok')));
     if(!clips.length)return;
     html+=`<div class="cam">${esc(cam.name)} — ${clips.length} clip${clips.length>1?'s':''}</div>`;
     if(cam.scene)html+=`<div class="scene">${esc(cam.scene)}</div>`;
     clips.forEach(c=>{
-      const marked=c.marked?`<span class="badge b-marked">${esc(c.marked.label)}${c.marked.note?': '+esc(c.marked.note):''}</span>`:'';
+      const marked=c.marked?`<span class="badge ${c.marked.label==='ignore'?'b-ignore':'b-marked'}">${esc(c.marked.label)}${c.marked.note?': '+esc(c.marked.note):''}</span>`:'';
       const rebadge=c.reeval_at?`<span class="badge b-reeval">re-evaluated</span>`:'';
       const m=c.msg?fmtMsg(c.msg):'<span class="muted">not analyzed yet — waiting in the watcher queue</span>';
       html+=`<div class="card"><div class="frame"><img src="/thumb?clip=${encodeURIComponent(c.clip)}" onclick="play(this,'${esc(c.clip)}')">
@@ -168,6 +175,7 @@ function render(){
       <div class="markbar"><input placeholder="why not alarming? (optional note)" id="n-${esc(c.clip)}">
       <button class="fp" onclick="mark('${esc(c.clip)}','fp')">false positive</button>
       <button class="tp" onclick="mark('${esc(c.clip)}','tp')">real alert</button>
+      <button class="ignore" onclick="mark('${esc(c.clip)}','ignore')">ignore for now</button>
       <button class="reeval" onclick="reeval('${esc(c.clip)}',this)">re-evaluate</button></div></div></div>`;
     });
   });
@@ -180,7 +188,8 @@ async function mark(clip,label){
   await loadDay();
   if(r.ok){
     const el=document.getElementById('count'), t=el.textContent;
-    el.textContent=`✓ pushed to learner — ${r.examples} active correction${r.examples===1?'':'s'}`;
+    el.textContent=label==='ignore'?'✓ parked — hidden, nothing pushed to learner'
+      :`✓ pushed to learner — ${r.examples} active correction${r.examples===1?'':'s'}`;
     setTimeout(()=>el.textContent=t,4000);
   }
 }
@@ -340,7 +349,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": status != "error", "status": status, "msg": msg})
             return
         label = body.get("label", "fp")
-        assert label in ("fp", "tp")
+        assert label in ("fp", "tp", "ignore")
         note = str(body.get("note", ""))[:200]
         state = alerter.load_json(STATE_PATH, {"clips": {}})
 

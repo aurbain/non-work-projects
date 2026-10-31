@@ -713,7 +713,8 @@ def mark_feedback(fb, state, clip_substr, label, note):
     matches = [k for k in state.get("clips", {}) if clip_substr in k]
     for k in matches:
         fb["marks"][k] = {"label": label, "note": note, "at": time.time()}
-        kb_promote_example(k, label, note)
+        if label != "ignore":  # "ignore for now" is review-side parking only — teaches the model nothing
+            kb_promote_example(k, label, note)
         if label == "fp":
             msg = state["clips"][k].get("msg", "")
             ex = {"clip": k, "msg": msg, "label": "fp", "note": note}
