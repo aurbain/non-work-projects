@@ -1,0 +1,65 @@
+# video-alerter
+
+Goal: watch motion-capture videos produced by SecuritySpy and alert me when something alarming happens. Software runs from this project on **either** analysis machine below — keep it portable: same code paths, no machine-specific logic except what is read from config/env.
+
+| Machine | What it is | Notes |
+|---|---|---|
+| `kahuna.local` | Apple M5 Ultra, 36 cores, 256 GB RAM, macOS 27.2, 1.8 TB disk | The LLM box; best place to run the watcher. SSH: `ssh aaron@kahuna.local` (alias `kahuna.local` in `~/.ssh/config`). |
+| `intel-macmini.local` | Intel i5-8500B, 32 GB, macOS 15.8.2 | Runs **SecuritySpy** (the capture host). SSH: `ssh aaron@intel-macmini.local`. Do not load this box with analysis. |
+| `TDI-MBPro40` (this dev Mac) | Apple Silicon, 36 GB RAM, macOS 27.2 | Where the code is written and debugged; same `/Volumes/aaron` mount. |
+
+kahuna has plenty of headroom, but keep the pipeline lean anyway — the capture tree is on slow SMB and SecuritySpy recording (on the Intel mini) has priority.
+
+## Where the video files live
+
+SecuritySpy (running on `intel-macmini.local`) drops recordings into a folder on a NAS volume mounted at `/Volumes/aaron` on the analysis machines (SMB share `//aaron@TNAS(SMB)/aaron`, ~1.3 TB free).
+
+Layout:
+
+```
+/Volumes/aaron/SecuritySpy_secondary/            # SecuritySpy capture root
+└── amcrest outdoor bullet right/                # one dir per camera
+    ├── 2026-10-27/                              # one dir per calendar day (YYYY-MM-DD)
+    │   ├── 10-27-2026 08-56-48 M amcrest outdoor bullet right.m4v   # the recording
+    │   ├── .10-27-2026 08-56-48 M ... .thm      # hidden JPEG-ish thumbnail (~110 KB)
+    │   └── .FF_Index                            # hidden per-day index, ignore
+    └── ...
+```
+
+Key facts:
+
+- **Only one camera today**: `amcrest outdoor bullet right` (outdoor). New cameras appear as sibling directories under `SecuritySpy_secondary/` — glob for them, do not hardcode.
+- **Video files**: `.m4v`, H.264, sizes ~10–55 MB each, one file per motion event. Filenames encode the start time: `MM-DD-YYYY HH-MM-SS <mode> <camera name>.m4v`.
+- **Thumbnails**: hidden `.<same name>.thm` (~110 KB) accompany every recording. Cheap first-pass signal for an LLM/vision model — read the `.thm` before decoding any video. Format: 132-byte proprietary header, then a plain baseline JPEG (~640x361) — skip to the first `FF D8 FF` marker and decode from there.
+- **`.FF_Index`**: SecuritySpy bookkeeping. Never parse or touch it.
+- Capture is event-driven, not continuous — gaps of minutes to hours are normal. Latest activity when this file was written: 2026-10-27.
+- Total captures so far ≈ 6 GB. Do not bulk-copy or checksum the tree; it is on SMB and slow.
+
+## Mount gotchas (SMB)
+
+- `/Volumes/aaron` is a network mount: it can be stale or unmounted. Check `mount | grep aaron` / stat the directory before assuming "no new files". If missing, remount: `mount_smbfs '//aaron@TNAS(SMB)._smb._tcp.local/aaron' /Volumes/aaron` (credentials are in the macOS keychain).
+- SMB + many small files is slow. Enumerate with one `ls`/`find` per day dir, not per file. Filenames contain spaces — always quote.
+- Never write into the capture tree. It is SecuritySpy's; a new file appearing mid-write looks complete but isn't — treat a file as ready only after its `.thm` exists and size is stable for one poll interval.
+
+## Machine notes
+
+- Both analysis machines are Apple Silicon macOS; `/Volumes/aaron` is mounted on both. Detect at startup (mount present?) rather than branching on hostname.
+- kahuna.local: SSH is `ssh aaron@kahuna.local` (alias `kahuna.local` in `~/.ssh/config`; user is `aaron`, NOT the local username). Homebrew installed at `/opt/homebrew`; in non-login SSH shells use full paths (`/opt/homebrew/bin/ffmpeg`). Has `ffmpeg`/`ffprobe` 9.x.
+- **Python**: run the watcher on the latest stable — **3.15** (`/opt/homebrew/bin/python3.15` on both analysis machines; system `/usr/bin/python3` is 3.9, do not target it). Keep the watcher **stdlib-only** so it needs no venv. **3.13** (`/opt/homebrew/bin/python3.13`) is only for the uvx `mlx-serve` fallback venv, where MLX wheels lag the newer interpreters.
+- LLM servers already running on kahuna (installed, do not re-install): **MLX-Serve.app** (v26.10.3) — OpenAI-compatible on **:11234**, host 0.0.0.0, LAN-shared, currently loads `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-4.7bpw` (MoE 4-bit, capabilities: chat/vision/video/json_schema, 262k ctx; model dirs `~/Desktop/mlx-llms`, `~/.mlx-serve/models`, `~/Desktop/lmstudio-llms`, `~/Desktop/omlx-llms`). **oMLX.app** (v0.7.3.dev2, `app.omlx`) also runs with its own server. Shared volume `/Volumes/lmstudio-llms/` holds `mlx-community/Qwen2.5-VL-3B-Instruct-8bit` (used by the uvx `mlx-serve` fallback on :8095, config `~/mlx-serve/models.yaml`).
+- Dev Mac: Homebrew `ffmpeg`/`ffprobe` 9.x and `python3` 3.15 installed. Frame extraction pattern: `ffprobe` for duration, then `ffmpeg -ss <t> -frames:v 1` at a few sampled timestamps.
+
+## Design constraints for LLM-written code
+
+- SecuritySpy recording has priority on kahuna: cap ffmpeg concurrency at 1, prefer thumbnail + 1–3 sampled frames per clip over full-video analysis.
+- LLM calls are the expensive part: pre-filter and only send clips that pass to a vision model. Measured across all current clips the thumbnail diff vs the previous clip has median ~35 (day/night exposure swamps real motion), so it only works as a **repeat-event dedupe** (default threshold 12), not a motion gate. Assume most clips reach the LLM; keep the per-clip cost (3 frames, one call) low instead.
+- Persist state (last-seen file per camera) in this project dir (e.g. `state.json`); the capture tree is read-only ground truth.
+- Alerting goes to me — prefer macOS notification + a log line; any push channel gets chosen later.
+- Learning is prompt-side, not weights: `scene.json` holds a per-camera permanent-layout description (auto-learned when missing, `--learn-scene` to refresh) and `state.json["examples"]` holds owner false-positive corrections (`--mark SUB --label fp --note …`) that get injected into the analysis prompt. Keep both small — prompt bloat costs tokens per call.
+
+## LLM requirements (what must be running on the analysis machine)
+
+- **Primary endpoint: mlx-serve on kahuna :8095, model `qwen3-vl-30b-a3b`** — `Qwen3-VL-30B-A3B-Instruct` (vision-first MoE, DeepStack enabled, ~3B active so fast), served by uvx `mlx-serve` (config `~/mlx-serve/models.yaml`, `hf_path` = `/Users/aaron/Desktop/mlx-llms/mlx-community/Qwen3-VL-30B-A3B-Instruct-bf16`). This is the alerter's default (`ALERTER_LLM_BASE=http://127.0.0.1:8095/v1`, `ALERTER_LLM_MODEL=qwen3-vl-30b-a3b`). Restart mlx-serve after editing models.yaml.
+- **Fallbacks:** same mlx-serve, model `qwen2.5-vl-3b` (`Qwen2.5-VL-3B-Instruct-8bit`, `/Volumes/lmstudio-llms/...`); or MLX-Serve.app on :11234 (`ddalcu/Qwen3.8-Flash-Next...` — a reasoning LLM with a bolted-on vision tower, weaker at small/night objects, and it shares inference with the coding session). Set the two env vars to switch.
+- **Vision model is required** — must accept base64 `image_url` content parts. Qwen3-VL is chosen specifically for small-object/night-IR recall that the Flash-Next model's non-DeepStack vision tower misses.- Text model (`Qwen3.5-9B`) is optional — only for a later summarizer/deduper of alerts.
+- The watcher degrades gracefully: if no LLM endpoint answers, it still does motion pre-filtering, logs candidate clips, and alerts "unanalyzed" rather than crashing.

@@ -1,0 +1,6 @@
+state.json
+alerts.log
+scene.json
+feedback.json
+tmp/
+__pycache__/
