@@ -52,10 +52,16 @@ Key facts:
 ## Design constraints for LLM-written code
 
 - SecuritySpy recording has priority on kahuna: cap ffmpeg concurrency at 1, prefer thumbnail + 1–3 sampled frames per clip over full-video analysis.
-- LLM calls are the expensive part: pre-filter and only send clips that pass to a vision model. Measured across all current clips the thumbnail diff vs the previous clip has median ~35 (day/night exposure swamps real motion), so it only works as a **repeat-event dedupe** (default threshold 12), not a motion gate. Assume most clips reach the LLM; keep the per-clip cost (3 frames, one call) low instead.
+- LLM calls are the expensive part: pre-filter and only send clips that pass to a vision model. Thumbnail diffs are **brightness/contrast-normalized** (`norm_gray`) so cloud-shadow/exposure ramps don't masquerade as events (same frame under a 30% darkening: raw diff 65 → normalized 6). The remaining median ~35 between clips is genuine content change, so dedupe (threshold 12; 20 within a 3-min event window) only trims repeat segments, not real motion. Assume most clips reach the LLM; keep the per-clip cost (3 frames, one call) low.
+- Wind and weather: environmental motion is structural (leaves genuinely move), so it can't be deduped away — the prompt hard rule ("environmental motion is threat=none no matter how much of the frame is moving") + scene map vegetation zones + owner FP feedback are the defense. If windy days still produce HIGH verdicts, that's feedback-loop material.
 - Persist state (last-seen file per camera) in this project dir (e.g. `state.json`); the capture tree is read-only ground truth.
 - Alerting goes to me — prefer macOS notification + a log line; any push channel gets chosen later.
-- Learning is prompt-side, not weights: `scene.json` holds a per-camera permanent-layout description (auto-learned when missing, `--learn-scene` to refresh) and `state.json["examples"]` holds owner false-positive corrections (`--mark SUB --label fp --note …`) that get injected into the analysis prompt. Keep both small — prompt bloat costs tokens per call.
+- Learning is prompt-side, not weights, backed by a disk knowledge base:
+  - `scene.json` — per-camera permanent-layout description (auto-learned when missing, `--learn-scene` to refresh).
+  - `knowledge/clips/<hash>/` — every analyzed clip keeps its thumb, 3 sampled frames, and verdict (`meta.json`), plus an append-only `clips.jsonl`. `knowledge/examples/` holds the same evidence for every reviewed (FP/TP) clip. Ceiling `ALERTER_KB_MAX_MB` (default 20 GB; ~1 MB/clip → years of history).
+  - `feedback.json` — marks (audit trail) + up to 100 FP corrections with normalized-thumbnail vectors for deterministic suppression.
+  - Prompt injection per call: scene map + 8 newest text corrections + up to 3 FP example **images** (captioned "Owner-labeled FALSE POSITIVE …").
+- Owner corrections: `alerter.py --mark SUB --label fp --note …` or the review UI buttons (same code path; also promotes the clip's evidence into `knowledge/examples/`).
 
 ## LLM requirements (what must be running on the analysis machine)
 

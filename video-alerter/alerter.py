@@ -8,6 +8,7 @@ See CLAUDE.md for layout, constraints and env vars.
 import argparse
 import base64
 import glob
+import hashlib
 import json
 import os
 import re
@@ -26,11 +27,15 @@ STATE_PATH = os.environ.get("ALERTER_STATE", os.path.join(PROJECT_DIR, "state.js
 LOG_PATH = os.environ.get("ALERTER_LOG", os.path.join(PROJECT_DIR, "alerts.log"))
 SCENE_PATH = os.environ.get("ALERTER_SCENE", os.path.join(PROJECT_DIR, "scene.json"))
 FEEDBACK_PATH = os.environ.get("ALERTER_FEEDBACK", os.path.join(PROJECT_DIR, "feedback.json"))
+KB_DIR = os.environ.get("ALERTER_KB", os.path.join(PROJECT_DIR, "knowledge"))
+KB_MAX_MB = int(os.environ.get("ALERTER_KB_MAX_MB", "20000"))  # 20 GB ceiling; frames are tiny
 TMP_DIR = os.path.join(PROJECT_DIR, "tmp")
 LLM_BASE = os.environ.get("ALERTER_LLM_BASE", "http://127.0.0.1:8095/v1").rstrip("/")
 LLM_MODEL = os.environ.get("ALERTER_LLM_MODEL", "qwen3-vl-30b-a3b")
 LLM_TIMEOUT = float(os.environ.get("ALERTER_LLM_TIMEOUT", "180"))
 DIFF_THRESHOLD = float(os.environ.get("ALERTER_DIFF_THRESHOLD", "12.0"))
+EVENT_WINDOW_S = float(os.environ.get("ALERTER_EVENT_WINDOW", "180"))
+EVENT_DIFF_THRESHOLD = float(os.environ.get("ALERTER_EVENT_DIFF_THRESHOLD", "20.0"))
 FP_THUMB_DIFF = float(os.environ.get("ALERTER_FP_THUMB_DIFF", "5.0"))
 FP_TEXT_SIM = float(os.environ.get("ALERTER_FP_TEXT_SIM", "0.5"))
 
@@ -44,7 +49,10 @@ PROMPT = (
     "threat=high means a person, vehicle, or animal near the property that the owner "
     "should know about, or anything that looks like a break-in, damage, fire or danger. "
     "threat=low means ordinary activity (passers-by, distant traffic). "
-    "threat=none means wind, shadows, animals-small-creatures, weather, or no clear subject."
+    "threat=none means environmental motion only: swaying trees/branches/grass in wind, "
+    "moving or fading shadows, cloud-driven light changes, rain or snow, camera noise, "
+    "small creatures, or no clear subject. Environmental motion is threat=none no matter "
+    "how much of the frame is moving."
 )
 
 SCENE_PROMPT = (
@@ -94,6 +102,103 @@ def load_feedback():
 def save_feedback(fb):
     # type: (Dict) -> None
     save_json(FEEDBACK_PATH, fb)
+
+
+def rid(s):
+    # type: (str) -> str
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+
+
+def kb_dir_for(kind, ident):
+    # type: (str, str) -> str
+    return os.path.join(KB_DIR, kind, rid(ident))
+
+
+def kb_free_bytes():
+    # type: () -> int
+    total = 0
+    for root, _dirs, files in os.walk(KB_DIR):
+        for fn in files:
+            try:
+                total += os.path.getsize(os.path.join(root, fn))
+            except OSError:
+                pass
+    return max(0, KB_MAX_MB * 1024 * 1024 - total)
+
+
+def kb_store_clip(rel, when, camera, status, msg, thm_jpeg, frames):
+    # type: (str, str, str, str, str, Optional[bytes], List[bytes]) -> str
+    """Persist everything the system saw and concluded for one clip."""
+    d = kb_dir_for("clips", rel)
+    try:
+        if kb_free_bytes() < 50 * 1024 * 1024:
+            return d
+        os.makedirs(d, exist_ok=True)
+        if thm_jpeg:
+            with open(os.path.join(d, "thumb.jpg"), "wb") as f:
+                f.write(thm_jpeg)
+        for i, img in enumerate(frames):
+            with open(os.path.join(d, "frame%d.jpg" % i), "wb") as f:
+                f.write(img)
+        meta = {"clip": rel, "when": when, "camera": camera, "status": status,
+                "msg": msg, "model": LLM_MODEL, "at": time.time()}
+        with open(os.path.join(d, "meta.json"), "w") as f:
+            json.dump(meta, f)
+        with open(os.path.join(KB_DIR, "clips.jsonl"), "a") as f:
+            f.write(json.dumps(meta) + "\n")
+    except OSError:
+        pass
+    return d
+
+
+def kb_promote_example(clip_rel, label, note):
+    # type: (str, str, str) -> bool
+    """Copy a reviewed clip's evidence into the few-shot example library."""
+    src = kb_dir_for("clips", clip_rel)
+    dst = kb_dir_for("examples", clip_rel)
+    try:
+        if not os.path.isdir(src):
+            video = os.path.join(ROOT, clip_rel)
+            os.makedirs(dst, exist_ok=True)
+            thm = decode_thm_jpeg(thm_path(video))
+            if thm:
+                with open(os.path.join(dst, "thumb.jpg"), "wb") as f:
+                    f.write(thm)
+        else:
+            if os.path.isdir(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        meta_path = os.path.join(dst, "meta.json")
+        meta = {}
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            meta = {"clip": clip_rel}
+        meta.update({"label": label, "note": note, "marked_at": time.time()})
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+        return True
+    except OSError:
+        return False
+
+
+def kb_example_images(examples, limit=3):
+    # type: (List[Dict], int) -> List[Tuple[str, bytes]]
+    """Most-recent FP examples that have a stored image, for image few-shotting."""
+    out = []
+    for e in examples[:limit]:
+        p = os.path.join(kb_dir_for("examples", e["clip"]), "thumb.jpg")
+        try:
+            with open(p, "rb") as f:
+                img = f.read()
+        except OSError:
+            continue
+        if img:
+            caption = "Owner-labeled FALSE POSITIVE: %s%s" % (
+                e.get("msg", "")[:140], " — owner note: " + e["note"] if e.get("note") else "")
+            out.append((caption, img))
+    return out
 
 
 def build_prompt(camera, when, scenes, examples):
@@ -254,7 +359,8 @@ def jpeg_to_gray(jpeg_bytes, w=64, h=36):
         )
         if r.returncode != 0:
             return None
-        return parse_pgm(dst)
+        raw = parse_pgm(dst)
+        return norm_gray(raw) if raw is not None else None
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -280,6 +386,26 @@ def gray_diff(a, b):
     for i in range(n):
         total += abs(a[i] - b[i])
     return total / n
+
+
+def norm_gray(g):
+    # type: (bytes) -> bytes
+    """Brightness/contrast-normalize a gray thumbnail: cloud shadows and exposure
+    ramps shift mean/std but leave structure intact, so normalized diffs ignore them."""
+    n = len(g)
+    if n == 0:
+        return g
+    mean = sum(g) / float(n)
+    var = sum((v - mean) ** 2 for v in g) / float(n)
+    std = var ** 0.5
+    if std < 1.0:
+        return bytes([128] * n)
+    k = 40.0 / std
+    out = bytearray(n)
+    for i in range(n):
+        v = int((g[i] - mean) * k + 128)
+        out[i] = 0 if v < 0 else (255 if v > 255 else v)
+    return bytes(out)
 
 
 def token_set(s):
@@ -369,12 +495,20 @@ def llm_chat(content):
     return msg_obj.get("content") or msg_obj.get("reasoning_content") or ""
 
 
-def llm_analyze(frames, prompt, no_llm):
-    # type: (List[bytes], str, bool) -> Tuple[str, str]
+def llm_analyze(frames, prompt, no_llm, ex_imgs=None):
+    # type: (List[bytes], str, bool, Optional[List[Tuple[str, bytes]]]) -> Tuple[str, str]
     """Return (status, message). status in ok|alert|unanalyzed."""
     if no_llm or not frames:
         return "unanalyzed", "no LLM analysis (frames=%d, llm=%s)" % (len(frames), "off" if no_llm else "on")
     content = [{"type": "text", "text": prompt}]
+    for caption, img in (ex_imgs or []):
+        content.append({"type": "text", "text": caption})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(img).decode("ascii")},
+        })
+    if ex_imgs:
+        content.append({"type": "text", "text": "Now judge THIS clip:"})
     for img in frames:
         content.append({
             "type": "image_url",
@@ -436,7 +570,8 @@ def process_cycle(state, args):
         pending += 1
         examples = load_feedback()["examples"]  # re-read: a review mid-cycle applies to the next clip
         prompt = build_prompt(camera, when, scenes, examples)
-        status, msg = analyze_clip(state, camera, when, video, prompt, examples, args)
+        ex_imgs = kb_example_images(examples)
+        status, msg, frames, thm = analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs)
         if status == "unanalyzed" and entry.get("retries", 0) < 2:
             entry["retries"] = entry.get("retries", 0) + 1
             entry["seen_polls"] = 1
@@ -445,6 +580,7 @@ def process_cycle(state, args):
         entry["status"] = status
         entry["msg"] = msg
         entry["done_at"] = time.time()
+        kb_store_clip(rel, when, camera, status, msg, thm, frames)
         processed += 1
         if status == "alert":
             log("ALERT %s: %s" % (rel, msg))
@@ -459,33 +595,47 @@ def process_cycle(state, args):
     return processed
 
 
-def analyze_clip(state, camera, when, video, prompt, examples, args):
-    # type: (Dict, str, str, str, str, List[Dict], argparse.Namespace) -> Tuple[str, str]
+def analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs=None):
+    # type: (Dict, str, str, str, str, List[Dict], argparse.Namespace, Optional[List[Tuple[str, bytes]]]) -> Tuple[str, str, List[bytes], Optional[bytes]]
+    epoch = 0.0
+    try:
+        epoch = time.mktime(time.strptime(when, "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        pass
+
+    def set_baseline():
+        if new_gray is not None:
+            state.setdefault("baselines", {})[camera] = list(new_gray)
+            state.setdefault("baseline_time", {})[camera] = epoch or time.time()
+
     thm = decode_thm_jpeg(thm_path(video))
     new_gray = jpeg_to_gray(thm) if thm else None
     baseline = state.get("baselines", {}).get(camera)
+    bt = state.get("baseline_time", {}).get(camera)
+    in_event = bool(bt and epoch and abs(epoch - bt) <= EVENT_WINDOW_S)
+    thr = EVENT_DIFF_THRESHOLD if in_event else DIFF_THRESHOLD
     if new_gray is not None and baseline is not None:
         d = gray_diff(new_gray, bytes(bytearray(baseline)))
-        if d < DIFF_THRESHOLD:
-            state["baselines"][camera] = list(new_gray)
-            return "skip", "thumbnail diff %.1f < %.1f" % (d, DIFF_THRESHOLD)
+        if d < thr:
+            set_baseline()
+            return "skip", "repeat clip (diff %.1f < %.1f%s)" % (
+                d, thr, ", within event window" if in_event else ""), [], thm
         hit = fp_thumb_match(new_gray, examples)
         if hit is not None:
-            state["baselines"][camera] = list(new_gray)
+            set_baseline()
             return "skip", "matches reviewed FP %s (thumb diff %.1f)%s" % (
                 hit[0]["clip"].split("/")[-1][:28], hit[1],
-                " — " + hit[0]["note"] if hit[0].get("note") else "")
+                " — " + hit[0]["note"] if hit[0].get("note") else ""), [], thm
     frames = sample_frames(video, count=3)
-    status, msg = llm_analyze(frames, prompt, args.no_llm)
+    status, msg = llm_analyze(frames, prompt, args.no_llm, ex_imgs)
     if status == "alert":
         dup = fp_text_match(msg, examples)
         if dup is not None:
             status = "ok"
             msg = "[downgraded: matches reviewed FP %s] %s" % (
                 dup["clip"].split("/")[-1][:28], msg)
-    if new_gray is not None:
-        state.setdefault("baselines", {})[camera] = list(new_gray)
-    return status, msg
+    set_baseline()
+    return status, msg, frames, thm
 
 
 def learn_scene(camera, args):
@@ -540,6 +690,7 @@ def mark_feedback(fb, state, clip_substr, label, note):
     matches = [k for k in state.get("clips", {}) if clip_substr in k]
     for k in matches:
         fb["marks"][k] = {"label": label, "note": note, "at": time.time()}
+        kb_promote_example(k, label, note)
         if label == "fp":
             msg = state["clips"][k].get("msg", "")
             ex = {"clip": k, "msg": msg, "label": "fp", "note": note}
@@ -548,8 +699,8 @@ def mark_feedback(fb, state, clip_substr, label, note):
                 gray = jpeg_to_gray(thm)
                 if gray is not None:
                     ex["gray"] = list(gray)
-            fb["examples"] = [ex] + [e for e in fb.get("examples", []) if e.get("clip") != k][:7]
-    fb["examples"] = fb.get("examples", [])[:8]
+            fb["examples"] = [ex] + [e for e in fb.get("examples", []) if e.get("clip") != k][:99]
+    fb["examples"] = fb.get("examples", [])[:100]
     return matches
 
 
