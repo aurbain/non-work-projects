@@ -32,7 +32,7 @@ Key facts:
 - **Video files**: `.m4v`, H.264, sizes ~10–55 MB each, one file per motion event. Filenames encode the start time: `MM-DD-YYYY HH-MM-SS <mode> <camera name>.m4v`.
 - **Thumbnails**: hidden `.<same name>.thm` (~110 KB) accompany every recording. Cheap first-pass signal for an LLM/vision model — read the `.thm` before decoding any video. Format: 132-byte proprietary header, then a plain baseline JPEG (~640x361) — skip to the first `FF D8 FF` marker and decode from there.
 - **`.FF_Index`**: SecuritySpy bookkeeping. Never parse or touch it.
-- Capture is event-driven, not continuous — gaps of minutes to hours are normal. Latest activity when this file was written: 2026-10-27.
+- Capture is event-driven, not continuous. Measured load (Oct 2026): **median ~38 clips/day, max 85, peak hour 63 clips/h (~1/min, 09:00–17:00)**; near-zero overnight. September's 1–6/day is stale — the camera got much busier. Design for ~100 clips/day with minute-scale bursts, not trickle.
 - Total captures so far ≈ 6 GB. Do not bulk-copy or checksum the tree; it is on SMB and slow.
 
 ## Mount gotchas (SMB)
