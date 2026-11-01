@@ -129,6 +129,7 @@ _FB_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS examples(clip TEXT PRIMARY KEY, label TEXT, pos INTEGER, data TEXT);"
     "CREATE TABLE IF NOT EXISTS overrides(clip TEXT PRIMARY KEY, status TEXT, at REAL, data TEXT);"
     "CREATE TABLE IF NOT EXISTS owners(clip TEXT PRIMARY KEY, pos INTEGER, data TEXT);"
+    "CREATE TABLE IF NOT EXISTS clips(clip TEXT PRIMARY KEY, status TEXT, done_at REAL, data TEXT);"
 )
 
 
@@ -503,21 +504,92 @@ def applescript_str(s):
     return '"' + esc + '"'
 
 
+# Watcher state (clip statuses, dedupe baselines, inherited config) lives in the
+# same alerter.db. The watcher stays the only writer (single-writer invariant);
+# the DB just makes reads/writes crash-proof and lets review + CLI read lock-free.
+_STATE_KEYS = ("clips", "baselines", "config")
+
+
+def _state_migrate(con):
+    # type: (sqlite3.Connection) -> None
+    if con.execute("SELECT 1 FROM meta WHERE key='state_migrated'").fetchone():
+        return
+    legacy = load_json(STATE_PATH, {})
+    if legacy:
+        _state_write(con, legacy)
+    con.execute("INSERT OR REPLACE INTO meta VALUES('state_migrated','1')")
+    try:
+        os.rename(STATE_PATH, STATE_PATH + ".pre-sqlite")
+    except OSError:
+        pass
+
+
+def _state_read(con):
+    # type: (sqlite3.Connection) -> Dict
+    state = {"clips": {r[0]: json.loads(r[1]) for r in con.execute("SELECT clip, data FROM clips")},
+             "baselines": {}}
+    for key in ("state_baselines", "state_config"):
+        row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        if row:
+            state[key.split("_", 1)[1]] = json.loads(row[0])
+    row = con.execute("SELECT value FROM meta WHERE key='state_extra'").fetchone()
+    if row:
+        state.update(json.loads(row[0]))
+    return state
+
+
+def _state_write(con, state):
+    # type: (sqlite3.Connection, Dict) -> None
+    con.execute("DELETE FROM clips")
+    con.executemany("INSERT INTO clips VALUES(?,?,?,?)", [
+        (k, v.get("status"), v.get("done_at", 0), json.dumps(v))
+        for k, v in state.get("clips", {}).items()])
+    for name, key in (("baselines", "state_baselines"), ("config", "state_config")):
+        if name in state:
+            con.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, json.dumps(state[name])))
+    extra = {k: v for k, v in state.items() if k not in _STATE_KEYS}
+    con.execute("INSERT OR REPLACE INTO meta VALUES('state_extra',?)", (json.dumps(extra),))
+
+
 def load_state():
     # type: () -> Dict
+    con = _db()
     try:
-        with open(STATE_PATH) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {"clips": {}, "baselines": {}}
+        con.execute("BEGIN IMMEDIATE")
+        _state_migrate(con)
+        con.execute("COMMIT")
+        return _state_read(con)
+    finally:
+        con.close()
 
 
 def save_state(state):
     # type: (Dict) -> None
-    tmp = STATE_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(state, f, indent=1)
-    os.replace(tmp, STATE_PATH)
+    con = _db()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        _state_write(con, state)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+
+def reset_state():
+    # type: () -> None
+    con = _db()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("DELETE FROM clips")
+        con.execute("DELETE FROM meta WHERE key IN ('state_baselines','state_config','state_extra')")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
 
 
 def clip_start_time(name):
@@ -1305,8 +1377,7 @@ def main():
     args = ap.parse_args()
 
     if args.reset:
-        if os.path.exists(STATE_PATH):
-            os.remove(STATE_PATH)
+        reset_state()
         print("state cleared")
         return 0
     if args.mark:

@@ -19,7 +19,6 @@ sys.path.insert(0, PROJECT_DIR)
 import alerter  # noqa: E402
 
 ROOT = alerter.ROOT
-STATE_PATH = alerter.STATE_PATH
 FEEDBACK_PATH = alerter.FEEDBACK_PATH
 SCENE_PATH = alerter.SCENE_PATH
 PORT = int(os.environ.get("ALERTER_REVIEW_PORT", "8765"))
@@ -65,7 +64,7 @@ def learn_worker(stop):
                 LEARN["current"] = None
                 stop.wait(1.0)
                 continue
-            state = alerter.load_json(STATE_PATH, {"clips": {}})
+            state = alerter.load_state()
             rel = pick_learn_clip(state, alerter.load_feedback())
             if not rel:
                 LEARN["current"] = None
@@ -307,14 +306,14 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
         elif url.path == "/api/days":
-            state = alerter.load_json(STATE_PATH, {"clips": {}})
+            state = alerter.load_state()
             days = sorted({k.split("/")[1] for k in state.get("clips", {}) if "/" in k})
             self._json({"days": days})
         elif url.path == "/api/day":
             self._day(q.get("date", [""])[0])
         elif url.path == "/api/learn":
             fb = alerter.load_feedback()
-            state = alerter.load_json(STATE_PATH, {"clips": {}})
+            state = alerter.load_state()
             self._json({
                 "on": bool(fb.get("learn_mode")),
                 "done": LEARN["done"], "fail": LEARN["fail"],
@@ -373,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
         label = body.get("label", "fp")
         assert label in ("fp", "tp", "ignore", "owner")
         note = str(body.get("note", ""))[:200]
-        state = alerter.load_json(STATE_PATH, {"clips": {}})
+        state = alerter.load_state()
 
         def _mark(fb):
             m = alerter.mark_feedback(fb, state, rel, label, note)
@@ -388,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", date or ""):
             self._json({"date": date, "cameras": []})
             return
-        state = alerter.load_json(STATE_PATH, {"clips": {}})
+        state = alerter.load_state()
         fb = alerter.load_feedback()
         scenes = alerter.load_json(SCENE_PATH, {})
         cams = {}
@@ -419,15 +418,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    if not os.path.exists(STATE_PATH):
-        print("warning: %s missing — run alerter.py first" % STATE_PATH)
+    if not alerter.load_state().get("clips"):
+        print("warning: no watched clips yet — run alerter.py first")
     if "ALERTER_LLM_BASE" not in os.environ:
-        cfg = alerter.load_json(STATE_PATH, {}).get("config", {})
+        cfg = alerter.load_state().get("config", {})
         if cfg.get("llm_base"):
             alerter.LLM_BASE = cfg["llm_base"]
         if cfg.get("model"):
             alerter.LLM_MODEL = cfg["model"]
-    print("review UI on http://%s:%d (state=%s, llm=%s)" % (HOST, PORT, STATE_PATH, alerter.LLM_BASE), flush=True)
+    print("review UI on http://%s:%d (db=%s, llm=%s)" % (HOST, PORT, alerter.DB_PATH, alerter.LLM_BASE), flush=True)
     stop = threading.Event()
     t = threading.Thread(target=learn_worker, args=(stop,), daemon=True)
     t.start()
