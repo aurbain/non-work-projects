@@ -59,9 +59,9 @@ Key facts:
 - Learning is prompt-side, not weights, backed by a disk knowledge base:
   - `scene.json` — per-camera permanent-layout description (auto-learned when missing, `--learn-scene` to refresh).
   - `knowledge/clips/<hash>/` — every analyzed clip keeps its thumb, 3 sampled frames, and verdict (`meta.json`), plus an append-only `clips.jsonl`. `knowledge/examples/` holds the same evidence for every reviewed (FP/TP) clip. Ceiling `ALERTER_KB_MAX_MB` (default 20 GB; ~1 MB/clip → years of history).
-  - `feedback.json` — marks (audit trail) + up to 100 FP corrections with normalized-thumbnail vectors for deterministic suppression.
-  - Prompt injection per call: scene map + 8 newest text corrections + up to 3 FP example **images** (captioned "Owner-labeled FALSE POSITIVE …").
-- Owner corrections: `alerter.py --mark SUB --label fp --note …` or the review UI buttons (same code path; also promotes the clip's evidence into `knowledge/examples/`).
+  - `feedback.json` — marks (audit trail) + up to 100 FP corrections with normalized-thumbnail vectors for deterministic suppression + `owners` (≤5 pinned resident reference cards).
+  - Prompt injection per call: scene map + owner cards (text for all ≤5 + up to 3 pinned **images** captioned "Owner-approved resident … NEVER a threat", exempt from recency rotation — this is identity learning) + 5 newest text corrections + up to 3 FP example **images** (captioned "Owner-labeled FALSE POSITIVE …").
+- Owner corrections: `alerter.py --mark SUB --label fp|tp|ignore|owner --note …` or the review UI buttons (same code path; fp/tp/owner also promote the clip's evidence into `knowledge/examples/`; `ignore` teaches nothing; `owner` pins the resident card).
 - **File ownership invariant**: the watcher is the ONLY writer of `state.json`; the review server is the ONLY writer of `feedback.json`. Review actions (marks, re-evals) therefore write `feedback.json`, never `state.json`. A re-eval (`POST /api/reeval`, re-runs the VLM with current knowledge) stores its result in `feedback.json["overrides"][clip]`; the review UI shows the override in place of the state status. The watcher records its `config` (llm_base, model) in `state.json` at startup so the review server inherits the same endpoint.
 
 ## LLM requirements (what must be running on the analysis machine)

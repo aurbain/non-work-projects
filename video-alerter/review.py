@@ -114,6 +114,8 @@ main{padding:16px;max-width:1280px;margin:0 auto}
 .b-marked{background:#2f6fed;color:#fff;margin-left:6px}
 .b-ignore{background:#3a3f47;color:#c8ccd2;margin-left:6px}
 .b-reeval{background:#4a3470;color:#e3d4ff;margin-left:6px}
+.b-owner{background:#14524d;color:#9ff0e4;margin-left:6px}
+button.owner{border-color:#1f7a70;color:#9ff0e4}button.owner:hover{background:#143f3a}
 button.reeval{border-color:#6b4fa0}button.reeval:hover{background:#3a2d55}button:disabled{opacity:.5;cursor:default}
 button.ignore:hover{border-color:#7d8794}
 .markbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
@@ -121,6 +123,10 @@ button.ignore:hover{border-color:#7d8794}
 button{background:#232932;color:#e6e6e6;border:1px solid #2f3742;border-radius:6px;padding:4px 12px;cursor:pointer}
 button.fp:hover{border-color:#c0392b}button.tp:hover{border-color:#27ae60}
 .empty{color:#7d8794;padding:40px;text-align:center}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;z-index:50;flex-direction:column;gap:10px}
+#modal video{max-width:92vw;max-height:84vh;border-radius:8px;background:#000}
+#modal .mname{color:#c8ccd2;font-size:12px}
+#modal button{padding:6px 16px}
 </style></head><body>
 <header><h1>video-alerter</h1><span id="days"></span>
 <label><input type="checkbox" id="alertsOnly"> alerts only</label>
@@ -129,6 +135,8 @@ button.fp:hover{border-color:#c0392b}button.tp:hover{border-color:#27ae60}
 <span id="learnStat" style="color:#b9a5e0;font-size:12px"></span>
 <span id="count" style="color:#9aa4b0"></span></header>
 <main id="out"><div class="empty">loading…</div></main>
+<div id="modal"><video id="mv" controls autoplay playsinline onclick="event.stopPropagation()"></video>
+<span class="mname" id="mname"></span><button onclick="closeModal()">close (esc)</button></div>
 <script>
 let day=null, data=null;
 async function j(u,opt){const r=await fetch(u,opt);return r.json()}
@@ -160,28 +168,41 @@ function render(){
   data.cameras.forEach(cam=>{
     // re-evaluated-and-downgraded clips are "resolved" — hidden unless show-all is on
     const clips=cam.clips.filter(c=>(!only||c.status==='alert')&&(showMarked||!c.marked)
-                                    &&(showMarked||!(c.reeval_at&&c.status==='ok')));
+                                    &&(showMarked||!(c.reeval_at&&c.status==='ok')))
+                         .sort((a,b)=>((a.status==='alert'?0:1)-(b.status==='alert'?0:1))||a.when.localeCompare(b.when));
     if(!clips.length)return;
     html+=`<div class="cam">${esc(cam.name)} — ${clips.length} clip${clips.length>1?'s':''}</div>`;
     if(cam.scene)html+=`<div class="scene">${esc(cam.scene)}</div>`;
     clips.forEach(c=>{
-      const marked=c.marked?`<span class="badge ${c.marked.label==='ignore'?'b-ignore':'b-marked'}">${esc(c.marked.label)}${c.marked.note?': '+esc(c.marked.note):''}</span>`:'';
+      const mk=c.marked?(c.marked.label==='ignore'?'b-ignore':c.marked.label==='owner'?'b-owner':'b-marked'):'';
+      const marked=c.marked?`<span class="badge ${mk}">${esc(c.marked.label)}${c.marked.note?': '+esc(c.marked.note):''}</span>`:'';
       const rebadge=c.reeval_at?`<span class="badge b-reeval">re-evaluated</span>`:'';
       const m=c.msg?fmtMsg(c.msg):'<span class="muted">not analyzed yet — waiting in the watcher queue</span>';
       html+=`<div class="card"><div class="frame"><img src="/thumb?clip=${encodeURIComponent(c.clip)}" onclick="play(this,'${esc(c.clip)}')">
       <div class="cap ${c.status==='alert'?'hot':''}">${m}</div></div>
       <div class="body"><span class="when">${esc(c.when)}</span>
       <span class="badge b-${c.status}">${c.status}</span>${marked}${rebadge}
-      <div class="markbar"><input placeholder="why not alarming? (optional note)" id="n-${esc(c.clip)}">
+      <div class="markbar"><input placeholder="name / why not alarming? (optional note)" id="n-${esc(c.clip)}">
       <button class="fp" onclick="mark('${esc(c.clip)}','fp')">false positive</button>
       <button class="tp" onclick="mark('${esc(c.clip)}','tp')">real alert</button>
+      <button class="owner" title="pins this person into every future prompt as an approved resident" onclick="mark('${esc(c.clip)}','owner')">this is resident</button>
       <button class="ignore" onclick="mark('${esc(c.clip)}','ignore')">ignore for now</button>
       <button class="reeval" onclick="reeval('${esc(c.clip)}',this)">re-evaluate</button></div></div></div>`;
     });
   });
   out.innerHTML=html||'<div class="empty">nothing this day</div>';
 }
-function play(img,clip){const v=document.createElement('video');v.src='/video?clip='+encodeURIComponent(clip);v.controls=true;v.autoplay=true;img.replaceWith(v)}
+function play(img,clip){
+  const m=document.getElementById('modal'), v=document.getElementById('mv');
+  v.src='/video?clip='+encodeURIComponent(clip); document.getElementById('mname').textContent=clip;
+  m.style.display='flex'; v.play();
+}
+function closeModal(){
+  const m=document.getElementById('modal'), v=document.getElementById('mv');
+  v.pause(); v.removeAttribute('src'); v.load(); m.style.display='none';
+}
+document.getElementById('modal').onclick=closeModal;
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 async function mark(clip,label){
   const note=document.getElementById('n-'+clip).value;
   const r=await j('/api/mark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip,label,note})});
@@ -189,6 +210,7 @@ async function mark(clip,label){
   if(r.ok){
     const el=document.getElementById('count'), t=el.textContent;
     el.textContent=label==='ignore'?'✓ parked — hidden, nothing pushed to learner'
+      :label==='owner'?`✓ pinned as resident — ${r.owners} owner card${r.owners===1?'':'s'} always in prompt`
       :`✓ pushed to learner — ${r.examples} active correction${r.examples===1?'':'s'}`;
     setTimeout(()=>el.textContent=t,4000);
   }
@@ -349,13 +371,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": status != "error", "status": status, "msg": msg})
             return
         label = body.get("label", "fp")
-        assert label in ("fp", "tp", "ignore")
+        assert label in ("fp", "tp", "ignore", "owner")
         note = str(body.get("note", ""))[:200]
         state = alerter.load_json(STATE_PATH, {"clips": {}})
 
         def _mark(fb):
             m = alerter.mark_feedback(fb, state, rel, label, note)
-            return {"matched": len(m), "examples": len(fb["examples"])}
+            return {"matched": len(m), "examples": len(fb["examples"]), "owners": len(fb.get("owners", []))}
 
         self._json(dict(ok=True, **alerter.update_feedback(_mark)))
 

@@ -105,6 +105,7 @@ def load_feedback():
     fb.setdefault("marks", {})
     fb.setdefault("examples", [])
     fb.setdefault("overrides", {})
+    fb.setdefault("owners", [])
     fb.setdefault("learn_mode", False)
     return fb
 
@@ -224,12 +225,34 @@ def kb_example_images(examples, limit=3):
     return out
 
 
-def build_prompt(camera, when, scenes, examples):
-    # type: (str, str, Dict, List) -> str
+def kb_owner_images(owners, limit=3):
+    # type: (List[Dict], int) -> List[Tuple[str, bytes]]
+    """Pinned owner-approved-resident reference images — exempt from the FP recency rotation."""
+    out = []
+    for o in owners[:limit]:
+        p = os.path.join(kb_dir_for("examples", o["clip"]), "thumb.jpg")
+        try:
+            with open(p, "rb") as f:
+                img = f.read()
+        except OSError:
+            continue
+        if img:
+            caption = "Owner-approved resident (household member, NEVER a threat): %s" % (
+                o.get("note") or "known resident")
+            out.append((caption, img))
+    return out
+
+
+def build_prompt(camera, when, scenes, examples, owners=None):
+    # type: (str, str, Dict, List, Optional[List]) -> str
     p = PROMPT.format(camera=camera, when=when)
     scene = scenes.get(camera)
     if scene:
         p += " Learned scene map for this camera: %s" % scene["text"]
+    if owners:
+        p += (" Owner-approved residents — these people live here; their presence and movement on the "
+              "property (garage, driveway, house, vehicles) is NEVER an intrusion or suspicious behavior: ")
+        p += "; ".join("%s" % (o.get("note") or o["clip"].split("/")[-1][:30]) for o in owners[:5]) + "."
     if examples:
         p += " Owner corrections on past alerts — respect them when judging similar scenes:"
         for e in examples[:5]:
@@ -591,9 +614,10 @@ def process_cycle(state, args):
         if pending >= args.limit:
             continue
         pending += 1
-        examples = load_feedback()["examples"]  # re-read: a review mid-cycle applies to the next clip
-        prompt = build_prompt(camera, when, scenes, examples)
-        ex_imgs = kb_example_images(examples)
+        fb = load_feedback()  # re-read: a review mid-cycle applies to the next clip
+        examples, owners = fb["examples"], fb.get("owners", [])
+        prompt = build_prompt(camera, when, scenes, examples, owners)
+        ex_imgs = kb_owner_images(owners) + kb_example_images(examples)
         status, msg, frames, thm = analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs)
         if status == "unanalyzed" and entry.get("retries", 0) < 2:
             entry["retries"] = entry.get("retries", 0) + 1
@@ -709,12 +733,16 @@ def learn_scene(camera, args):
 
 def mark_feedback(fb, state, clip_substr, label, note):
     # type: (Dict, Dict, str, str, str) -> List[str]
-    """Label matching clips; fp corrections become prompt examples."""
+    """Label matching clips; fp corrections become prompt examples, owner marks pin resident cards."""
     matches = [k for k in state.get("clips", {}) if clip_substr in k]
     for k in matches:
         fb["marks"][k] = {"label": label, "note": note, "at": time.time()}
         if label != "ignore":  # "ignore for now" is review-side parking only — teaches the model nothing
             kb_promote_example(k, label, note)
+        if label == "owner":
+            thm = decode_thm_jpeg(thm_path(os.path.join(ROOT, k)))
+            owner = {"clip": k, "note": note, "at": time.time(), "has_img": bool(thm)}
+            fb["owners"] = [owner] + [o for o in fb.get("owners", []) if o.get("clip") != k][:4]
         if label == "fp":
             msg = state["clips"][k].get("msg", "")
             ex = {"clip": k, "msg": msg, "label": "fp", "note": note}
@@ -738,9 +766,10 @@ def reeval_clip(rel):
     when = clip_start_time(rel.split("/")[-1])
     if not os.path.isfile(video):
         return "error", "clip file missing on disk"
-    examples = load_feedback()["examples"]
-    prompt = build_prompt(camera, when, load_scenes(), examples)
-    ex_imgs = kb_example_images(examples)
+    fb = load_feedback()
+    examples, owners = fb["examples"], fb.get("owners", [])
+    prompt = build_prompt(camera, when, load_scenes(), examples, owners)
+    ex_imgs = kb_owner_images(owners) + kb_example_images(examples)
     thm = decode_thm_jpeg(thm_path(video))
     frames = sample_frames(video, count=3)
     status, msg = llm_analyze(frames, prompt, False, ex_imgs)
@@ -779,8 +808,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="no macOS notifications")
     ap.add_argument("--reset", action="store_true", help="clear state.json and exit")
     ap.add_argument("--learn-scene", action="store_true", help="build/refresh scene maps, then exit")
-    ap.add_argument("--mark", metavar="SUBSTRING", help="label matching clips in state (fp|tp), then exit")
-    ap.add_argument("--label", choices=["fp", "tp"], default="fp", help="label for --mark (default fp)")
+    ap.add_argument("--mark", metavar="SUBSTRING", help="label matching clips in state (fp|tp|ignore|owner), then exit")
+    ap.add_argument("--label", choices=["fp", "tp", "ignore", "owner"], default="fp",
+                    help="label for --mark (default fp); owner pins a resident reference card")
     ap.add_argument("--note", default="", help="owner note for --mark, injected into future prompts")
     args = ap.parse_args()
 

@@ -60,10 +60,15 @@ First run backfills history at `--limit` clips/cycle; raise `--limit` for a fast
 python3.15 review.py     # http://127.0.0.1:8765 — set ALERTER_REVIEW_HOST=0.0.0.0 to share on LAN
 ```
 
-Per-day browse: date chips, thumbnail per clip (click to play the clip inline), status badge
-(alert/ok/skip/pending/unanalyzed), the alert text overlaid on the frame, the camera's learned scene map,
-and four actions per clip:
+Per-day browse: date chips, thumbnail per clip (click for a full-clip lightbox — `Esc` closes), suspected
+alerts sorted to the top, status badge (alert/ok/skip/pending/unanalyzed), the alert text overlaid on the
+frame, the camera's learned scene map, and five actions per clip:
 - **false positive / real alert** — become prompt examples immediately (`feedback.json`, re-read every cycle).
+- **this is resident** — pins the clip's thumbnail as an **owner reference card** (max 5, newest first):
+  its image + your note (e.g. "Bill, the homeowner") are injected into *every* future prompt as
+  *"Owner-approved resident — NEVER a threat"*, exempt from the FP recency rotation. This is how the
+  system learns a specific person: unlike FP examples (which age out of the 3-image/5-text windows),
+  owner cards never leave the prompt until you un-pin them. CLI: `--mark SUB --label owner --note "Bill"`.
 - **ignore for now** — parks the clip (audit-trail mark, hidden from the default view) *without* teaching
   the model anything: no prompt example, no KB promotion. It stays in the learn-mode rotation, so a later
   re-eval with fresh knowledge can still resolve it.
