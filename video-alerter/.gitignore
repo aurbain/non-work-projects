@@ -1,8 +1,21 @@
+# runtime state & scratch — TNAS copies are authoritative; Mac copies are mirrors
 state.json
 alerts.log
-scene.json
-feedback.json
-eval_history.jsonl
 tmp/
 __pycache__/
-knowledge/
+feedback.json
+feedback.json.pre-sqlite
+alerter.db-wal
+alerter.db-shm
+
+# knowledge base: bulk clip frames stay out; LEARNED data is tracked:
+#   alerter.db (marks/examples/overrides/owners), scene.json, eval_history.jsonl,
+#   knowledge/clips.jsonl, knowledge/examples/*/meta.json + thumb.jpg (identity cards)
+knowledge/*
+!knowledge/examples/
+!knowledge/clips.jsonl
+knowledge/examples/*
+!knowledge/examples/*/
+knowledge/examples/*/*
+!knowledge/examples/*/meta.json
+!knowledge/examples/*/thumb.jpg

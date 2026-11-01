@@ -36,7 +36,9 @@ systemctl restart video-alerter                # after editing code (rsync from 
 # review UI: http://192.168.4.130:8765        (use the IP — tnas.local resolves IPv6 first)
 ```
 
-Dev-loop from the Mac: edit → `rsync -a --exclude tmp/ --exclude __pycache__/ ./ aaron@tnas.local:/Volume1/alerter/` → restart the unit.
+Dev-loop from the Mac: edit → `rsync -a --exclude tmp/ --exclude __pycache__/ --exclude .git/ --exclude state.json --exclude feedback.json --exclude 'alerter.db*' --exclude scene.json --exclude knowledge/ --exclude alerts.log --exclude eval_history.jsonl ./ aaron@tnas.local:/Volume1/alerter/` → restart the unit. **Never rsync data files (`state.json`, `alerter.db`, `knowledge/`, …) toward the NAS** — the TNAS copies are authoritative; the Mac copies are stale mirrors (an un-excluded rsync silently rolled back `feedback.json` on 2026-10-31).
+
+Backup of learned knowledge (tracked in git: `alerter.db`, `scene.json`, `knowledge/clips.jsonl`, example thumbs): periodically `rsync -a aaron@tnas.local:/Volume1/alerter/{alerter.db,scene.json,alerts.log} . && rsync -a aaron@tnas.local:/Volume1/alerter/knowledge/clips.jsonl knowledge/ && rsync -a aaron@tnas.local:/Volume1/alerter/knowledge/examples/ knowledge/examples/ && git add -A && git commit`.
 
 Manual/ad-hoc runs (any machine that can see the capture root + kahuna):
 

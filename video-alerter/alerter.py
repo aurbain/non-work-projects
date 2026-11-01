@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,7 @@ STATE_PATH = os.environ.get("ALERTER_STATE", os.path.join(PROJECT_DIR, "state.js
 LOG_PATH = os.environ.get("ALERTER_LOG", os.path.join(PROJECT_DIR, "alerts.log"))
 SCENE_PATH = os.environ.get("ALERTER_SCENE", os.path.join(PROJECT_DIR, "scene.json"))
 FEEDBACK_PATH = os.environ.get("ALERTER_FEEDBACK", os.path.join(PROJECT_DIR, "feedback.json"))
+DB_PATH = os.environ.get("ALERTER_DB", os.path.join(PROJECT_DIR, "alerter.db"))
 KB_DIR = os.environ.get("ALERTER_KB", os.path.join(PROJECT_DIR, "knowledge"))
 EVAL_HISTORY = os.environ.get("ALERTER_EVAL", os.path.join(PROJECT_DIR, "eval_history.jsonl"))
 KB_MAX_MB = int(os.environ.get("ALERTER_KB_MAX_MB", "20000"))  # 20 GB ceiling; frames are tiny
@@ -117,20 +119,106 @@ def save_scenes(scenes):
     save_json(SCENE_PATH, scenes)
 
 
+# Learned knowledge (marks/examples/overrides/owners/learn_mode) lives in SQLite
+# (WAL): watcher, review server, learn worker and CLI all write it concurrently and
+# transactions make that safe. Row `data` holds the full entry JSON; the extra typed
+# columns exist for SQL queries. state.json stays a plain file (single writer).
+_FB_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);"
+    "CREATE TABLE IF NOT EXISTS marks(clip TEXT PRIMARY KEY, label TEXT, note TEXT, at REAL, data TEXT);"
+    "CREATE TABLE IF NOT EXISTS examples(clip TEXT PRIMARY KEY, label TEXT, pos INTEGER, data TEXT);"
+    "CREATE TABLE IF NOT EXISTS overrides(clip TEXT PRIMARY KEY, status TEXT, at REAL, data TEXT);"
+    "CREATE TABLE IF NOT EXISTS owners(clip TEXT PRIMARY KEY, pos INTEGER, data TEXT);"
+)
+
+
+def _db():
+    # type: () -> sqlite3.Connection
+    con = sqlite3.connect(DB_PATH, timeout=15, isolation_level=None)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=15000")
+    con.executescript(_FB_SCHEMA)
+    return con
+
+
+def _fb_read(con):
+    # type: (sqlite3.Connection) -> Dict
+    fb = {
+        "marks": {r[0]: json.loads(r[1]) for r in con.execute("SELECT clip, data FROM marks")},
+        "examples": [json.loads(r[0]) for r in con.execute("SELECT data FROM examples ORDER BY pos")],
+        "overrides": {r[0]: json.loads(r[1]) for r in con.execute("SELECT clip, data FROM overrides")},
+        "owners": [json.loads(r[0]) for r in con.execute("SELECT data FROM owners ORDER BY pos")],
+        "learn_mode": False,
+    }
+    row = con.execute("SELECT value FROM meta WHERE key='learn_mode'").fetchone()
+    fb["learn_mode"] = bool(row and row[0] == "1")
+    return fb
+
+
+def _fb_write(con, fb):
+    # type: (sqlite3.Connection, Dict) -> None
+    con.execute("DELETE FROM marks")
+    con.executemany("INSERT INTO marks VALUES(?,?,?,?,?)", [
+        (k, v.get("label"), v.get("note", ""), v.get("at", 0), json.dumps(v))
+        for k, v in fb.get("marks", {}).items()])
+    con.execute("DELETE FROM examples")
+    con.executemany("INSERT INTO examples VALUES(?,?,?,?)", [
+        (e.get("clip"), e.get("label"), i, json.dumps(e))
+        for i, e in enumerate(fb.get("examples", [])[:100])])
+    con.execute("DELETE FROM overrides")
+    con.executemany("INSERT INTO overrides VALUES(?,?,?,?)", [
+        (k, v.get("status"), v.get("at") or v.get("reeval_at") or 0, json.dumps(v))
+        for k, v in fb.get("overrides", {}).items()])
+    con.execute("DELETE FROM owners")
+    con.executemany("INSERT INTO owners VALUES(?,?,?)", [
+        (o.get("clip"), i, json.dumps(o)) for i, o in enumerate(fb.get("owners", [])[:5])])
+    con.execute("INSERT OR REPLACE INTO meta VALUES('learn_mode', ?)",
+                ("1" if fb.get("learn_mode") else "0",))
+
+
+def _fb_migrate(con):
+    # type: (sqlite3.Connection) -> None
+    if con.execute("SELECT 1 FROM meta WHERE key='migrated'").fetchone():
+        return
+    legacy = load_json(FEEDBACK_PATH, {})
+    if legacy:
+        legacy.setdefault("marks", {})
+        legacy.setdefault("examples", [])
+        legacy.setdefault("overrides", {})
+        legacy.setdefault("owners", [])
+        legacy.setdefault("learn_mode", False)
+        _fb_write(con, legacy)
+    con.execute("INSERT OR REPLACE INTO meta VALUES('migrated','1')")
+    try:
+        os.rename(FEEDBACK_PATH, FEEDBACK_PATH + ".pre-sqlite")
+    except OSError:
+        pass
+
+
 def load_feedback():
     # type: () -> Dict
-    fb = load_json(FEEDBACK_PATH, {})
-    fb.setdefault("marks", {})
-    fb.setdefault("examples", [])
-    fb.setdefault("overrides", {})
-    fb.setdefault("owners", [])
-    fb.setdefault("learn_mode", False)
-    return fb
+    con = _db()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        _fb_migrate(con)
+        con.execute("COMMIT")
+        return _fb_read(con)
+    finally:
+        con.close()
 
 
 def save_feedback(fb):
     # type: (Dict) -> None
-    save_json(FEEDBACK_PATH, fb)
+    con = _db()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        _fb_write(con, fb)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
 
 
 FB_LOCK = threading.Lock()
@@ -138,12 +226,23 @@ FB_LOCK = threading.Lock()
 
 def update_feedback(mutate):
     # type: (Callable[[Dict], Any]) -> Any
-    """Serialized load -> mutate -> save of feedback.json for threaded callers (review server)."""
+    """Atomic load -> mutate -> save in ONE SQLite transaction (safe across the
+    review server's threads AND other processes: CLI, scripts)."""
     with FB_LOCK:
-        fb = load_feedback()
-        out = mutate(fb)
-        save_feedback(fb)
-    return out
+        con = _db()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            _fb_migrate(con)
+            fb = _fb_read(con)
+            out = mutate(fb)
+            _fb_write(con, fb)
+            con.execute("COMMIT")
+            return out
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
 
 
 def rid(s):
