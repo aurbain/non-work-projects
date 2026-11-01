@@ -45,8 +45,8 @@ KB_DIR = os.environ.get("ALERTER_KB", os.path.join(PROJECT_DIR, "knowledge"))
 EVAL_HISTORY = os.environ.get("ALERTER_EVAL", os.path.join(PROJECT_DIR, "eval_history.jsonl"))
 KB_MAX_MB = int(os.environ.get("ALERTER_KB_MAX_MB", "20000"))  # 20 GB ceiling; frames are tiny
 TMP_DIR = os.path.join(PROJECT_DIR, "tmp")
-LLM_BASE = os.environ.get("ALERTER_LLM_BASE", "http://127.0.0.1:8095/v1").rstrip("/")
-LLM_MODEL = os.environ.get("ALERTER_LLM_MODEL", "qwen3-vl-30b-a3b")
+LLM_BASE = os.environ.get("ALERTER_LLM_BASE", "http://kahuna.local:11234/v1").rstrip("/")
+LLM_MODEL = os.environ.get("ALERTER_LLM_MODEL", "lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-8bit")
 LLM_TIMEOUT = float(os.environ.get("ALERTER_LLM_TIMEOUT", "180"))
 DIFF_THRESHOLD = float(os.environ.get("ALERTER_DIFF_THRESHOLD", "12.0"))
 EVENT_WINDOW_S = float(os.environ.get("ALERTER_EVENT_WINDOW", "180"))
@@ -608,6 +608,7 @@ def enumerate_clips():
         cameras = sorted(
             d for d in glob.glob(os.path.join(ROOT, "*"))
             if os.path.isdir(d) and not os.path.basename(d).startswith(".")
+            and os.path.abspath(d) != PROJECT_DIR  # alerter may live inside the capture root
         )
     except OSError:
         return out

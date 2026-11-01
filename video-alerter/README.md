@@ -7,26 +7,20 @@ as systemd services; the VLM runs on kahuna over the network. See `CLAUDE.md` fo
 
 ## 1. LLM server (on kahuna)
 
-**Primary: uvx `mlx-serve` on :8095, model `qwen3-vl-30b-a3b`** — `Qwen3-VL-30B-A3B-Instruct`
-(vision-first MoE, DeepStack) from `/Users/aaron/Desktop/mlx-llms/mlx-community/Qwen3-VL-30B-A3B-Instruct-bf16`.
-Config `~/mlx-serve/models.yaml`; start:
+**Primary: MLX-Serve.app on :11234, model `lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-8bit`** — GUI-managed, host 0.0.0.0, LAN-shared; lazy-loads models by ID from its model dirs, up to 4 resident (idle-evict 4 h). Nothing to start if the app is running.
+
+Check: `curl http://kahuna.local:11234/v1/chat/completions -d '{"model":"lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-8bit","messages":[{"role":"user","content":"ping"}],"max_tokens":4}'` — first request may cold-load the model for a minute.
+
+Legacy fallback (uninstalled 2026-11-01): uvx `mlx-serve` on :8095, model `qwen3-vl-30b-a3b` / `qwen2.5-vl-3b` (config `~/mlx-serve/models.yaml`). Reinstall + start:
 
 ```sh
 ssh aaron@kahuna.local
-cd ~/mlx-serve
 /opt/homebrew/bin/uvx --python 3.13 --from mlx-serve --with mlx-vlm mlx-serve start --host 0.0.0.0 --port 8095
 ```
 
-Check: `curl http://kahuna.local:8095/v1/models` (both `qwen3-vl-30b-a3b` and fallback `qwen2.5-vl-3b` listed).
-Model loads on first request (~60 GB bf16 — allow a minute); unloads after 10 min idle.
-
-Fallbacks: same server, `ALERTER_LLM_MODEL=qwen2.5-vl-3b`; or MLX-Serve.app on :11234
-(`ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-4.7bpw` — general LLM with bolted-on vision, weaker at
-small/night objects, shares inference with the coding session).
-
 ## 2. Run the watcher
 
-**Home is `tnas.local`** (Ubuntu 22.04, `/Volume1/alerter`) as two systemd units — env in `/etc/alerter.env`:
+**Home is `tnas.local`** (Ubuntu 22.04, `/Volume1/SecuritySpy/alerter`) as two systemd units — env in `/etc/alerter.env`:
 
 ```sh
 ssh aaron@tnas.local
@@ -36,14 +30,14 @@ systemctl restart video-alerter                # after editing code (rsync from 
 # review UI: http://192.168.4.130:8765        (use the IP — tnas.local resolves IPv6 first)
 ```
 
-Dev-loop from the Mac: edit → `rsync -a --exclude tmp/ --exclude __pycache__/ --exclude .git/ --exclude state.json --exclude feedback.json --exclude 'alerter.db*' --exclude scene.json --exclude knowledge/ --exclude alerts.log --exclude eval_history.jsonl ./ aaron@tnas.local:/Volume1/alerter/` → restart the unit. **Never rsync data files (`state.json`, `alerter.db`, `knowledge/`, …) toward the NAS** — the TNAS copies are authoritative; the Mac copies are stale mirrors (an un-excluded rsync silently rolled back `feedback.json` on 2026-10-31).
+Dev-loop from the Mac: edit → `rsync -a --exclude tmp/ --exclude __pycache__/ --exclude .git/ --exclude state.json --exclude feedback.json --exclude 'alerter.db*' --exclude scene.json --exclude knowledge/ --exclude alerts.log --exclude eval_history.jsonl ./ aaron@tnas.local:/Volume1/SecuritySpy/alerter/` → restart the unit. **Never rsync data files (`state.json`, `alerter.db`, `knowledge/`, …) toward the NAS** — the TNAS copies are authoritative; the Mac copies are stale mirrors (an un-excluded rsync silently rolled back `feedback.json` on 2026-10-31).
 
-Backup of learned knowledge (tracked in git: `alerter.db`, `scene.json`, `knowledge/clips.jsonl`, example thumbs): periodically `rsync -a aaron@tnas.local:/Volume1/alerter/{alerter.db,scene.json,alerts.log} . && rsync -a aaron@tnas.local:/Volume1/alerter/knowledge/clips.jsonl knowledge/ && rsync -a aaron@tnas.local:/Volume1/alerter/knowledge/examples/ knowledge/examples/ && git add -A && git commit`.
+Backup of learned knowledge (tracked in git: `alerter.db`, `scene.json`, `knowledge/clips.jsonl`, example thumbs): periodically `rsync -a aaron@tnas.local:/Volume1/SecuritySpy/alerter/{alerter.db,scene.json,alerts.log} . && rsync -a aaron@tnas.local:/Volume1/SecuritySpy/alerter/knowledge/clips.jsonl knowledge/ && rsync -a aaron@tnas.local:/Volume1/SecuritySpy/alerter/knowledge/examples/ knowledge/examples/ && git add -A && git commit`.
 
 Manual/ad-hoc runs (any machine that can see the capture root + kahuna):
 
 ```sh
-ALERTER_ROOT=/Volume1/SecuritySpy ALERTER_LLM_BASE=http://kahuna.local:8095/v1 python3 alerter.py
+ALERTER_ROOT=/Volume1/SecuritySpy python3 alerter.py
 ```
 
 Useful flags: `--once` (single pass), `--limit N` (max clips per cycle, default 5), `--dry-run`
@@ -112,7 +106,7 @@ CLI equivalent of marking: `alerter.py --mark SUB --label fp --note …`.
 | Var | Default | Meaning |
 |---|---|---|
 | `ALERTER_ROOT` | `/Volumes/aaron/SecuritySpy_secondary` | capture root |
-| `ALERTER_LLM_BASE` | `http://127.0.0.1:8095/v1` | OpenAI-compatible base (uvx mlx-serve on kahuna) |
+| `ALERTER_LLM_BASE` | `http://kahuna.local:11234/v1` | OpenAI-compatible base (MLX-Serve.app on kahuna) |
 | `ALERTER_LLM_MODEL` | `qwen3-vl-30b-a3b` | model id the server accepts |
 | `ALERTER_LLM_TIMEOUT` | `180` | per-call seconds |
 | `ALERTER_DIFF_THRESHOLD` | `12.0` | thumbnail-diff below this = repeat clip, skipped (dedupe only, see CLAUDE.md) |
@@ -134,7 +128,7 @@ with the *current* prompt + pipeline and scores against your labels, appending a
 `eval_history.jsonl`:
 
 ```sh
-ALERTER_LLM_BASE=http://kahuna.local:8095/v1 python3.15 alerter.py --eval
+python3.15 alerter.py --eval
 # EVAL n=118 tp=9 fp=4 tn=99 fn=6 err=0  precision=0.69 recall=0.60  (41.2 min)
 #   MISS <clip> [tp] got=ok  ...   <- real threats the pipeline now misses (over-suppression)
 #   MISS <clip> [fp] got=alert ... <- false positives it still can't kill
