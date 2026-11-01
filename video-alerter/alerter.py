@@ -932,8 +932,8 @@ def process_cycle(state, args):
             entry["seen_polls"] = 1
             log("RETRY %s (attempt %d): %s" % (rel, entry["retries"], msg))
             continue
-        entry["status"] = status
-        entry["msg"] = msg
+        entry["status"], entry["msg"] = owner_label_override(fb, rel, status, msg)
+        status = entry["status"]
         entry["done_at"] = time.time()
         kb_store_clip(rel, when, camera, status, msg, thm, frames)
         processed += 1
@@ -1064,6 +1064,18 @@ def mark_feedback(fb, state, clip_substr, label, note):
     return matches
 
 
+def owner_label_override(fb, rel, status, msg):
+    # type: (Dict, str, str, str) -> Tuple[str, str]
+    """The owner's mark beats the model: a clip the owner labeled fp/owner never
+    alerts, no matter what the VLM says now (e.g. Bill the neighbor's garage visits)."""
+    if status != "alert":
+        return status, msg
+    m = (fb.get("marks") or {}).get(rel) or {}
+    if m.get("label") in ("fp", "owner"):
+        return "ok", "[owner-labeled FP: %s] %s" % (m.get("note") or "owner-labeled", (msg or "")[:160])
+    return status, msg
+
+
 def judge_clip(rel, fb):
     # type: (str, Dict) -> Tuple[str, str, List[bytes], Optional[bytes], List[Tuple[str, bytes]]]
     """Analyze one clip with CURRENT knowledge (scene + owners + FP examples), no dedupe,
@@ -1086,9 +1098,11 @@ def reeval_clip(rel):
     """Re-run the VLM on one clip with the CURRENT scene map + owner corrections.
     Bypasses dedupe/thumbnail-skip (a manual re-eval always re-analyzes). Stores the
     result as a feedback override + refreshes the knowledge base. Returns (status, msg)."""
-    status, msg, frames, thm, extras = judge_clip(rel, load_feedback())
+    fb = load_feedback()
+    status, msg, frames, thm, extras = judge_clip(rel, fb)
     if status == "error":
         return status, msg
+    status, msg = owner_label_override(fb, rel, status, msg)
     kb_store_clip(rel, clip_start_time(rel.split("/")[-1]), rel.split("/")[0], status, msg,
                   thm, frames + [img for _, img in extras if img])
     update_feedback(lambda fb: fb.setdefault("overrides", {}).__setitem__(
