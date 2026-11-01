@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import smtplib
 import sqlite3
 import subprocess
 import sys
@@ -24,6 +25,11 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 HOME = os.path.expanduser("~")
@@ -66,6 +72,17 @@ VOTE_TEMP = float(os.environ.get("ALERTER_VOTE_TEMP", "0.7"))
 VOTE_QUORUM = float(os.environ.get("ALERTER_VOTE_QUORUM", "1.0"))
 # Seconds to sleep between --eval clips (0 = as fast as possible; raise when NAS is loaded).
 EVAL_DELAY = float(os.environ.get("ALERTER_EVAL_DELAY", "0"))
+# Alert email: no-op unless ALERTER_SMTP_HOST + ALERTER_MAIL_TO are set. Password from
+# ALERTER_SMTP_PASSFILE (root-only file) or ALERTER_SMTP_PASS. Clips above the cap
+# (Gmail/iCloud limit ~25 MB) send as thumbnail + path instead.
+SMTP_HOST = os.environ.get("ALERTER_SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("ALERTER_SMTP_PORT", "587"))
+SMTP_SSL = os.environ.get("ALERTER_SMTP_SSL", "0") == "1"
+SMTP_USER = os.environ.get("ALERTER_SMTP_USER", "")
+SMTP_PASS_FILE = os.environ.get("ALERTER_SMTP_PASSFILE", "/etc/alerter-smtp.pass")
+MAIL_FROM = os.environ.get("ALERTER_MAIL_FROM", SMTP_USER)
+MAIL_TO = os.environ.get("ALERTER_MAIL_TO", "")
+MAIL_MAX_BYTES = int(float(os.environ.get("ALERTER_MAIL_MAX_MB", "20")) * 1024 * 1024)
 
 CLIP_RE = re.compile(r"^(\d{2})-(\d{2})-(\d{4}) (\d{2})-(\d{2})-(\d{2}) (.+)\.m4v$")
 
@@ -486,16 +503,99 @@ def log(msg):
         pass
 
 
-def notify(title, body):
-    # type: (str, str) -> None
-    script = (
-        'display notification %s with title %s sound name "Glass"'
-        % (applescript_str(body), applescript_str(title))
-    )
+def notify(title, body, clip=None):
+    # type: (str, str, Optional[str]) -> None
+    if sys.platform == "darwin":
+        script = (
+            'display notification %s with title %s sound name "Glass"'
+            % (applescript_str(body), applescript_str(title))
+        )
+        try:
+            subprocess.run(["osascript", "-e", script], timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    send_mail(title, body, clip)
+
+
+def _smtp_password():
+    # type: () -> str
+    if SMTP_PASS_FILE and os.path.isfile(SMTP_PASS_FILE):
+        try:
+            with open(SMTP_PASS_FILE) as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+    return os.environ.get("ALERTER_SMTP_PASS", "")
+
+
+def send_mail(title, body, clip=None):
+    # type: (str, str, Optional[str]) -> bool
+    """SMTP alert with the clip attached (thumbnail when the clip is too big for
+    the provider). No-op unless SMTP_HOST and MAIL_TO are configured."""
+    if not SMTP_HOST or not MAIL_TO:
+        return False
+    msg = MIMEMultipart()
+    msg["From"], msg["To"], msg["Subject"] = MAIL_FROM, MAIL_TO, title
+    msg.attach(MIMEText(body + "\n", "utf-8"))
+    attached = attach_media(msg, clip)
+    if clip and not attached:
+        size = human_size(os.path.getsize(clip)) if os.path.exists(clip) else "?"
+        msg.attach(MIMEText("Clip too large to attach (%s): %s" % (size, clip), "utf-8"))
     try:
-        subprocess.run(["osascript", "-e", script], timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+        con = (smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60) if SMTP_SSL
+               else smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60))
+        try:
+            if not SMTP_SSL:
+                con.starttls()
+            pw = _smtp_password()
+            if SMTP_USER and pw:
+                con.login(SMTP_USER, pw)
+            con.sendmail(MAIL_FROM, [a.strip() for a in MAIL_TO.split(",")], msg.as_string())
+        finally:
+            con.quit()
+        log("MAILED %s (%s%s)" % (title, MAIL_TO, "" if attached else ", thumb only"))
+        return True
+    except Exception as e:  # never let a mail failure kill the watcher
+        log("MAIL FAILED %s: %r" % (title, e))
+        return False
+
+
+def attach_media(msg, clip):
+    # type: (MIMEMultipart, Optional[str]) -> bool
+    """Attach the clip when it fits the provider limit, else its thumbnail.
+    Returns True when the video itself went out."""
+    if not clip or not os.path.isfile(clip):
+        return False
+    if os.path.getsize(clip) <= MAIL_MAX_BYTES:
+        _attach_file(msg, clip, "video/mp4", os.path.basename(clip))
+        return True
+    thm = decode_thm_jpeg(thm_path(clip))
+    if thm:
+        part = MIMEImage(thm, "jpeg")
+        part.add_header("Content-Disposition", "attachment",
+                        filename=os.path.basename(clip).rsplit(".", 1)[0] + ".jpg")
+        msg.attach(part)
+    return False
+
+
+def _attach_file(msg, path, ctype, name):
+    # type: (MIMEMultipart, str, str, str) -> None
+    maintype, subtype = ctype.split("/", 1)
+    with open(path, "rb") as f:
+        part = MIMEBase(maintype, subtype)
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", "attachment", filename=name)
+    msg.attach(part)
+
+
+def human_size(n):
+    # type: (int) -> str
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%.1f %s" % (n, unit)
+        n /= 1024.0
+    return "%s?" % n
 
 
 def applescript_str(s):
@@ -1112,11 +1212,11 @@ def process_cycle(state, args):
         if status == "alert":
             log("ALERT %s: %s" % (rel, msg))
             if not args.dry_run:
-                notify("Security alert (%s)" % camera, msg)
+                notify("Security alert (%s)" % camera, msg, video)
         elif status == "unanalyzed":
             log("CANDIDATE (unanalyzed) %s: %s" % (rel, msg))
             if not args.dry_run:
-                notify("Motion candidate, unanalyzed (%s)" % camera, rel)
+                notify("Motion candidate, unanalyzed (%s)" % camera, rel, video)
         else:
             log("%s %s: %s" % (status.upper(), rel, msg))
     return processed
