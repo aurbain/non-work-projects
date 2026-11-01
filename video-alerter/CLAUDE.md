@@ -4,11 +4,12 @@ Goal: watch motion-capture videos produced by SecuritySpy and alert me when some
 
 | Machine | What it is | Notes |
 |---|---|---|
-| `kahuna.local` | Apple M5 Ultra, 36 cores, 256 GB RAM, macOS 27.2, 1.8 TB disk | The LLM box; best place to run the watcher. SSH: `ssh aaron@kahuna.local` (alias `kahuna.local` in `~/.ssh/config`). |
+| `tnas.local` (192.168.4.130) | **Current analysis host** — Ubuntu 22.04 server, 4 cores, 8 GB, x86_64, root=uid0. SSH: `ssh aaron@tnas.local` (key auth set up). Runs watcher + review + eval. | Home of the capture tree on **local disk** (`/Volume1/SecuritySpy`) — no SMB. Repo at `/Volume1/alerter`. systemd units `video-alerter` + `video-alerter-review`, env in `/etc/alerter.env`. Review UI: `http://192.168.4.130:8765` (use the IP; `tnas.local` resolves IPv6 first and the server binds IPv4). Modest box + it's the NAS — keep it nice (nice/lock/throttle). `notify()` is macOS-only, so alerts are log+UI until a Linux channel is chosen. |
+| `kahuna.local` | Apple M5 Ultra, 36 cores, 256 GB RAM, macOS 27.2, 1.8 TB disk | The **LLM box** — mlx-serve :8095 (qwen3-vl-30b-a3b). Reached over the network from tnas. SSH: `ssh aaron@kahuna.local`. |
 | `intel-macmini.local` | Intel i5-8500B, 32 GB, macOS 15.8.2 | Runs **SecuritySpy** (the capture host). SSH: `ssh aaron@intel-macmini.local`. Do not load this box with analysis. |
-| `TDI-MBPro40` (this dev Mac) | Apple Silicon, 36 GB RAM, macOS 27.2 | Where the code is written and debugged; same `/Volumes/aaron` mount. |
+| `TDI-MBPro40` (this dev Mac) | Apple Silicon, 36 GB RAM, macOS 27.2 | Where the code is written and debugged; same `/Volumes/aaron` mount. No longer runs the watcher (state.json now lives on tnas). |
 
-kahuna has plenty of headroom, but keep the pipeline lean anyway — the capture tree is on slow SMB and SecuritySpy recording (on the Intel mini) has priority.
+**Compute moved to the NAS (2026-11-01)** at owner request: watcher + review + eval run on `tnas.local`, reading clips from local `/Volume1/SecuritySpy` (one sequential read per clip via `stage_local`, then all ffmpeg/frame work is local; cross-process `ffmpeg.lock` keeps concurrency at 1; `nice 15`). Only the VLM call crosses the network (to kahuna). TNAS is 4-core and just came off a ZFS scrub — keep throttles gentle (watcher `--interval 240`, learn 60s, eval 60s) until the scrub is done, then dial back.
 
 ## Where the video files live
 

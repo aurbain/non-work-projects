@@ -1,8 +1,9 @@
 # video-alerter
 
-Watches SecuritySpy clips on the live `securityspy` share (auto-detected mount; see CLAUDE.md), samples 3 frames
-per clip, classifies them with a local vision LLM, and raises a macOS notification for anything rated HIGH
-threat. Runs on kahuna.local or the dev Mac (Python 3.15, stdlib only). See `CLAUDE.md` for layout and constraints.
+Watches SecuritySpy clips on the live `securityspy` capture root (local disk on the NAS; auto-detected mount elsewhere — see CLAUDE.md),
+samples 8 motion-peak frames per clip (plus a magnified motion-region crop, IR boost at night), classifies them with a local vision LLM
+via 5-vote self-consistency, and raises an alert for anything rated HIGH. Runs on **tnas.local** (Ubuntu 22.04, Python 3.10, stdlib only)
+as systemd services; the VLM runs on kahuna over the network. See `CLAUDE.md` for layout and constraints.
 
 ## 1. LLM server (on kahuna)
 
@@ -25,13 +26,22 @@ small/night objects, shares inference with the coding session).
 
 ## 2. Run the watcher
 
-```sh
-# on kahuna (LLM local) — defaults already point here:
-/opt/homebrew/bin/python3.15 alerter.py        # watch forever, 60 s polls
+**Home is `tnas.local`** (Ubuntu 22.04, `/Volume1/alerter`) as two systemd units — env in `/etc/alerter.env`:
 
-# on the dev Mac (LLM remote on kahuna):
-export ALERTER_LLM_BASE=http://kahuna.local:8095/v1
-python3 alerter.py
+```sh
+ssh aaron@tnas.local
+systemctl status video-alerter video-alerter-review
+journalctl -u video-alerter -f                 # live watcher log
+systemctl restart video-alerter                # after editing code (rsync from dev Mac first)
+# review UI: http://192.168.4.130:8765        (use the IP — tnas.local resolves IPv6 first)
+```
+
+Dev-loop from the Mac: edit → `rsync -a --exclude tmp/ --exclude __pycache__/ ./ aaron@tnas.local:/Volume1/alerter/` → restart the unit.
+
+Manual/ad-hoc runs (any machine that can see the capture root + kahuna):
+
+```sh
+ALERTER_ROOT=/Volume1/SecuritySpy ALERTER_LLM_BASE=http://kahuna.local:8095/v1 python3 alerter.py
 ```
 
 Useful flags: `--once` (single pass), `--limit N` (max clips per cycle, default 5), `--dry-run`

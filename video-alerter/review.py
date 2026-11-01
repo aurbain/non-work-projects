@@ -185,7 +185,7 @@ function render(){
       <div class="markbar"><input placeholder="name / why not alarming? (optional note)" id="n-${esc(c.clip)}">
       <button class="fp" onclick="mark('${esc(c.clip)}','fp')">false positive</button>
       <button class="tp" onclick="mark('${esc(c.clip)}','tp')">real alert</button>
-      <button class="owner" title="pins this person into every future prompt as an approved resident" onclick="mark('${esc(c.clip)}','owner')">this is resident</button>
+      <button class="owner" title="pins this person into every future prompt as owner-approved (household, neighbor, worker) — never a threat" onclick="mark('${esc(c.clip)}','owner')">known person</button>
       <button class="ignore" onclick="mark('${esc(c.clip)}','ignore')">ignore for now</button>
       <button class="reeval" onclick="reeval('${esc(c.clip)}',this)">re-evaluate</button></div></div></div>`;
     });
@@ -210,7 +210,7 @@ async function mark(clip,label){
   if(r.ok){
     const el=document.getElementById('count'), t=el.textContent;
     el.textContent=label==='ignore'?'✓ parked — hidden, nothing pushed to learner'
-      :label==='owner'?`✓ pinned as resident — ${r.owners} owner card${r.owners===1?'':'s'} always in prompt`
+      :label==='owner'?`✓ pinned as known person — ${r.owners} reference card${r.owners===1?'':'s'} always in prompt`
       :`✓ pushed to learner — ${r.examples} active correction${r.examples===1?'':'s'}`;
     setTimeout(()=>el.textContent=t,4000);
   }

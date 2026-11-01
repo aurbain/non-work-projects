@@ -255,8 +255,8 @@ def kb_owner_images(owners, limit=3):
         except OSError:
             continue
         if img:
-            caption = "Owner-approved resident (household member, NEVER a threat): %s" % (
-                o.get("note") or "known resident")
+            caption = "Owner-approved person (known to the owner — household, neighbor, or their worker; NEVER a threat): %s" % (
+                o.get("note") or "known person")
             out.append((caption, img))
     return out
 
@@ -268,8 +268,9 @@ def build_prompt(camera, when, scenes, examples, owners=None):
     if scene:
         p += " Learned scene map for this camera: %s" % scene["text"]
     if owners:
-        p += (" Owner-approved residents — these people live here; their presence and movement on the "
-              "property (garage, driveway, house, vehicles) is NEVER an intrusion or suspicious behavior: ")
+        p += (" Owner-approved people (household, neighbors, or their workers — pinned reference images "
+              "may accompany these): their presence and movement on or around the property "
+              "(garage, driveway, house, vehicles) is routine and NEVER an intrusion, suspicious behavior, or a threat:")
         p += "; ".join("%s" % (o.get("note") or o["clip"].split("/")[-1][:30]) for o in owners[:5]) + "."
     if examples:
         p += " Owner corrections on past alerts — respect them when judging similar scenes:"
@@ -348,12 +349,18 @@ def stage_local(video):
     os.makedirs(CACHE_DIR, exist_ok=True)
     part = dst + ".part"
     try:
-        with open(video, "rb") as src, open(part, "wb") as out:
-            while True:
-                chunk = src.read(1024 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
+        os.makedirs(TMP_DIR, exist_ok=True)
+        with open(FF_LOCK_PATH, "a") as lf:  # the copy counts as NAS I/O too
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                with open(video, "rb") as src, open(part, "wb") as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
         if os.path.getsize(part) != size:
             os.remove(part)
             return video
@@ -762,6 +769,7 @@ def extract_evidence(video):
     and a magnified crop of the region that actually moved."""
     if not (FFMPEG and FFPROBE):
         return [], []
+    video = stage_local(video)  # one sequential read; all seeks/crops/scene-score pass hit local disk
     os.makedirs(TMP_DIR, exist_ok=True)
     duration = probe_duration(video) or 10.0
     night = NIGHT_BOOST and is_night_ir(video)
