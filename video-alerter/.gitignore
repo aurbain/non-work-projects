@@ -2,6 +2,7 @@ state.json
 alerts.log
 scene.json
 feedback.json
+eval_history.jsonl
 tmp/
 __pycache__/
 knowledge/

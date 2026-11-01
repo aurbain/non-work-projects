@@ -106,6 +106,31 @@ CLI equivalent of marking: `alerter.py --mark SUB --label fp --note …`.
 | `ALERTER_DIFF_THRESHOLD` | `12.0` | thumbnail-diff below this = repeat clip, skipped (dedupe only, see CLAUDE.md) |
 | `ALERTER_REVIEW_PORT` / `ALERTER_REVIEW_HOST` | `8765` / `127.0.0.1` | review server bind |
 | `ALERTER_STATE` / `ALERTER_LOG` / `ALERTER_SCENE` / `ALERTER_FEEDBACK` | files in project dir | override data paths |
+| `ALERTER_FRAMES` | `8` | frames sampled per clip (motion-peak, then uniform fill) |
+| `ALERTER_MOTION_PEAKS` | `1` | `0` disables scene-score peak sampling (pure uniform) |
+| `ALERTER_ZOOM_CROP` | `1` | `0` disables the magnified motion-region crop |
+| `ALERTER_NIGHT_BOOST` | `1` | `0` disables the IR/night contrast-boost on near-monochrome clips |
+| `ALERTER_VOTES` | `5` | self-consistency samples per clip (`1` = single shot, no voting) |
+| `ALERTER_VOTE_TEMP` | `0.7` | sampling temperature for votes |
+| `ALERTER_VOTE_QUORUM` | `1.0` | fraction of votes that must say HIGH to alert (`1.0`=unanimous, `0.6`=3/5) |
+| `ALERTER_EVAL` | `eval_history.jsonl` | where `--eval` appends confusion matrices |
+
+## Measuring accuracy — `--eval`
+
+The golden set is whatever you've marked in the review UI (fp/tp/owner). `--eval` re-judges those clips
+with the *current* prompt + pipeline and scores against your labels, appending a confusion matrix to
+`eval_history.jsonl`:
+
+```sh
+ALERTER_LLM_BASE=http://kahuna.local:8095/v1 python3.15 alerter.py --eval
+# EVAL n=118 tp=9 fp=4 tn=99 fn=6 err=0  precision=0.69 recall=0.60  (41.2 min)
+#   MISS <clip> [tp] got=ok  ...   <- real threats the pipeline now misses (over-suppression)
+#   MISS <clip> [fp] got=alert ... <- false positives it still can't kill
+```
+
+`tp/fp` are measured on the *owner's* definition of a real alert (a `tp` mark). Run it before and after any
+prompt/threshold/pipeline change — it's the only honest way to know a tweak helped. `fn` (missed real
+threats) is the number to guard hardest in a security system; if it rises, lower `ALERTER_VOTE_QUORUM`.
 
 ## Autostart (later)
 
