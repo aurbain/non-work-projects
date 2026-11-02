@@ -1,75 +1,79 @@
 # video-alerter
 
-Goal: watch motion-capture videos produced by SecuritySpy and alert me when something alarming happens. Software runs from this project on **either** analysis machine below — keep it portable: same code paths, no machine-specific logic except what is read from config/env.
+Goal: watch motion-capture videos produced by SecuritySpy and alert the owner when something alarming happens. Stdlib-only Python (3.10+ on the NAS, 3.15 on Macs); keep it portable — no machine-specific logic except config/env.
 
-| Machine | What it is | Notes |
+## Machines
+
+| Machine | Role | Notes |
 |---|---|---|
-| `tnas.local` (192.168.4.130) | **Current analysis host** — Ubuntu 22.04 server, 4 cores, 8 GB, x86_64, root=uid0. SSH: `ssh aaron@tnas.local` (key auth set up). Runs watcher + review + eval. | Home of the capture tree on **local disk** (`/Volume1/SecuritySpy`) — no SMB. Repo at `/Volume1/SecuritySpy/alerter` (inside the capture root since 2026-11-01 — `enumerate_clips` skips the project dir). systemd units `video-alerter` + `video-alerter-review`, env in `/etc/alerter.env`. Dev-loop: rsync code **only** — always `--exclude` the data files (`state.json feedback.json scene.json knowledge/ alerts.log eval_history.jsonl`); TNAS copies are authoritative (an un-excluded rsync rolled back `feedback.json` on 2026-10-31). Review UI: `http://192.168.4.130:8765` (use the IP; `tnas.local` resolves IPv6 first and the server binds IPv4). Modest box + it's the NAS — keep it nice (nice/lock/throttle). `notify()` is macOS-only, so alerts are log+UI until a Linux channel is chosen. |
-| `kahuna.local` | Apple M5 Ultra, 36 cores, 256 GB RAM, macOS 27.2, 1.8 TB disk | The **LLM box** — MLX-Serve.app :11234 (VL model + coding models, single GUI-managed server). Reached over the network from tnas. SSH: `ssh aaron@kahuna.local`. |
-| `intel-macmini.local` | Intel i5-8500B, 32 GB, macOS 15.8.2 | Runs **SecuritySpy** (the capture host). SSH: `ssh aaron@intel-macmini.local`. Do not load this box with analysis. |
-| `TDI-MBPro40` (this dev Mac) | Apple Silicon, 36 GB RAM, macOS 27.2 | Where the code is written and debugged; same `/Volumes/aaron` mount. No longer runs the watcher (state.json now lives on tnas). |
+| `tnas.local` / **192.168.4.130** | **Analysis host** — TerraMaster F4-425 Plus, TOS 7 (Ubuntu 22.04 base), 4-core, 8 GB, aaron=uid0. SSH key auth. | Runs watcher + review UI + eval as systemd units `video-alerter` / `video-alerter-review`; env `/etc/alerter.env`. Capture tree on **local NVMe** `/Volume1/SecuritySpy` (no SMB here). Repo copy: `/Volume1/SecuritySpy/alerter` (inside the capture root — `enumerate_clips` skips it). Review UI: **http://192.168.4.130:8765** (use the IP; `tnas.local` resolves IPv6, server binds IPv4). Use the IP for ssh too if mDNS is flaky. Quirks: `systemctl restart` sometimes fails "Interactive authentication required" — run `systemctl daemon-reload` first. Ad-hoc shells need `set -a; . /etc/alerter.env; set +a`. |
+| `kahuna.local` | **LLM host only** | MLX-Serve.app (GUI-managed, :11234, LAN) serves the alerter VL model **and** coding models. Lazy-loads by model ID, up to 4 resident, idle-evict 4 h. SSH `aaron@kahuna.local`; ffmpeg at `/opt/homebrew/bin`. |
+| `intel-macmini.local` | **Capture host** (SecuritySpy) | Records to SMB share `//aaron@TNAS(SMB)/securityspy` → `/Volume1/SecuritySpy` on the NAS. Do not load with analysis. Camera is 192.168.1.123 on its own NIC (en1); RTSP port 554. |
+| dev Mac (repo home) | Coding only | No watcher. |
 
-**Compute moved to the NAS (2026-11-01)** at owner request: watcher + review + eval run on `tnas.local`, reading clips from local `/Volume1/SecuritySpy` (one sequential read per clip via `stage_local`, then all ffmpeg/frame work is local; cross-process `ffmpeg.lock` keeps concurrency at 1; `nice 15`). Only the VLM call crosses the network (to kahuna). TNAS is 4-core and just came off a ZFS scrub — keep throttles gentle (watcher `--interval 240`, learn 60s, eval 60s) until the scrub is done, then dial back.
+**Dev loop:** edit locally, then rsync **code only** — always exclude the data files; TNAS copies are authoritative (a 2026-10-31 rsync without excludes rolled back the learned feedback):
+
+```
+rsync -a --exclude tmp/ --exclude __pycache__/ --exclude .git/ --exclude state.json --exclude feedback.json \
+  --exclude 'alerter.db*' --exclude scene.json --exclude knowledge/ --exclude alerts.log --exclude eval_history.jsonl \
+  ./ aaron@192.168.4.130:/Volume1/SecuritySpy/alerter/
+```
+
+Restart services after deploy (`systemctl daemon-reload; systemctl restart video-alerter video-alerter-review`).
+
+## LLM
+
+- **Endpoint:** `http://kahuna.local:11234/v1` (OpenAI-compatible). **Model:** `lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-8bit` — vision-first MoE, DeepStack; chosen for night-IR/small-object recall. Configured in `/etc/alerter.env` (`ALERTER_LLM_BASE`, `ALERTER_LLM_MODEL`); built-in defaults match.
+- The old uvx `mlx-serve` manager (:8095) was **uninstalled 2026-11-01**; reinstall recipe in README §1 if ever needed.
+- **pi** (coding agent) on the TNAS also uses kahuna: provider `mlx-serv` in `~/.pi/agent/models.json`, default model `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-4.7bpw`, `tuiMode: regular`.
+- Watcher degrades gracefully: no LLM → clips logged as `unanalyzed` candidates, never crashes.
+
+## Storage state of the TNAS (2026-11-02)
+
+- `/Volume1` = WD_BLACK SN770 2 TB NVMe (vg1-lv0, ext4): capture tree + alerter + homes. **Healthy. All system data lives here.**
+- `/Volume2` = 4× HDD RAID5 (vg0-lv1, btrfs): **DAMAGED**. Hyper Cache (Fanxiang 256 G NVMe) turned out to be **writeback with bad blocks**; the forced cache detach (TOS GUI + `lvconvert --uncache --force`) abandoned unflushed dirty blocks and btrfs metadata went with them. Volume2 mounts only read-only with `rescue=ignorebadroots,nologreplay,...`. **Treat as read-only until rescued, then TOS-GUI delete + recreate** — recreation claims the whole 16.3 T pool (10.9 T currently unallocated), so expansion and reformat are one step. Do NOT mkfs from CLI (TOS expects its subvolume layout). Never mount rw.
+- Hyper Cache is gone permanently (drive physically removed). The USB-C port is **20 Gbps (Gen 2×2)** — use it for rescue copies; the Type-A ports and the currently-plugged TerraMaster dock negotiate USB 2 (40 MB/s) — replug into the C port.
+- `md1` RAID5 = the HDDs (Volume2); `md1` naming shuffles across boots — match by member disks, not names. 263 clips in state have no video file on the NAS (migrated from the old SMB root; some days are thumbnails-only) — the learn loop blacklists them permanently.
 
 ## Where the video files live
 
-SecuritySpy (running on `intel-macmini.local`) records to the NAS share `//aaron@TNAS(SMB)/securityspy` — **this is the live capture root** (has every day, incl. the newest). Mounted as: `/Volumes/SecuritySpy` on the dev Mac, `~/Volumes/securityspy` on kahuna (its `/Volumes` is SIP-protected; new mounts need a home-dir mount point). The old `SecuritySpy_secondary` folder on the `aaron` share is **stale** (stopped 10-27) — kept as last-resort fallback only. `alerter.py` auto-detects the first existing root (`ALERTER_ROOT` overrides); relative clip keys (`camera/date/file.m4v`) are identical across mounts, so state carries over.
-
-Layout:
+Capture root = `/Volume1/SecuritySpy` on the NAS (SMB share "securityspy"; mounted `/Volumes/SecuritySpy` on Macs, `~/Volumes/securityspy` on kahuna). `ALERTER_ROOT` overrides; `alerter.py` auto-detects the first existing root; relative clip keys (`camera/date/file.m4v`) are stable across mounts.
 
 ```
-<Vol>/SecuritySpy/                                # live capture root (SMB share "securityspy")
-└── amcrest outdoor bullet right/                # one dir per camera
-    ├── 2026-10-29/                              # one dir per calendar day (YYYY-MM-DD)
-    │   ├── 10-29-2026 08-56-48 M amcrest outdoor bullet right.m4v   # the recording
-    │   ├── .10-29-2026 08-56-48 M ... .thm      # hidden JPEG-ish thumbnail (~110 KB)
-    │   └── .FF_Index                            # hidden per-day index, ignore
-    └── ...
+<root>/<camera name>/<YYYY-MM-DD>/MM-DD-YYYY HH-MM-SS <mode> <camera>.m4v   # one file per motion event (10–55 MB, H.264)
+                              .<same name>.thm                              # hidden ~110 KB thumbnail: 132-byte header, then plain JPEG (skip to FF D8 FF)
+                              .FF_Index                                     # SecuritySpy bookkeeping — never touch
 ```
 
-Key facts:
+- One camera today: `amcrest outdoor bullet right` — glob for siblings, never hardcode.
+- Load: median ~38 clips/day, bursts to ~1/min daytime; design for ~100/day.
+- Treat a file as ready only after its `.thm` exists and size is stable one poll. **Never write into the capture tree.**
 
-- **Only one camera today**: `amcrest outdoor bullet right` (outdoor). New cameras appear as sibling directories under `SecuritySpy_secondary/` — glob for them, do not hardcode.
-- **Video files**: `.m4v`, H.264, sizes ~10–55 MB each, one file per motion event. Filenames encode the start time: `MM-DD-YYYY HH-MM-SS <mode> <camera name>.m4v`.
-- **Thumbnails**: hidden `.<same name>.thm` (~110 KB) accompany every recording. Cheap first-pass signal for an LLM/vision model — read the `.thm` before decoding any video. Format: 132-byte proprietary header, then a plain baseline JPEG (~640x361) — skip to the first `FF D8 FF` marker and decode from there.
-- **`.FF_Index`**: SecuritySpy bookkeeping. Never parse or touch it.
-- Capture is event-driven, not continuous. Measured load (Oct 2026): **median ~38 clips/day, max 85, peak hour 63 clips/h (~1/min, 09:00–17:00)**; near-zero overnight. September's 1–6/day is stale — the camera got much busier. Design for ~100 clips/day with minute-scale bursts, not trickle.
-- Total captures so far ≈ 6 GB. Do not bulk-copy or checksum the tree; it is on SMB and slow.
+## Pipeline (alerter.py)
 
-## Mount gotchas (SMB)
+1. `enumerate_clips` (skips the project dir) → per-clip readiness check.
+2. Pre-filter: brightness/contrast-**normalized** thumb diff (`norm_gray`, thresholds 12 / 20 within a 3-min event window) dedupes repeat segments; `fp_thumb_match` suppresses clips within `FP_THUMB_DIFF` of a learned FP vector.
+3. Evidence (`extract_evidence`, one ffmpeg at a time via cross-process `tmp/ffmpeg.lock`, `nice 15`): stage locally, probe duration, 8 motion-peak-sampled frames (scene-score picks), night/IR contrast boost, magnified crop of the motion region.
+4. Verdict: `llm_analyze_vote` — `ALERTER_VOTES` (5) votes at temp 0.7; alert requires `ALERTER_VOTE_QUORUM` (default 1.0 = unanimous HIGH). Prompt: scene map + owner cards + FP corrections.
+5. **Identity discipline (2026-11-02):** the prompt forbids naming a person without a visible distinguishing feature, resident cards excuse *presence* but never *dangerous actions*, and "not X" owner notes override cards. When a verdict claims a resident's name, `identity_verify` runs a **neutral** SAME/DIFFERENT/UNSURE check against the reference images; DIFFERENT/UNSURE re-judges with all cards voided and prefixes `[identity unverified: …]`. (Motivation: the model was confabulating "Bill" for the owner's own Subaru.)
+6. `owner_label_override`: any clip the owner marked fp/owner is force-downgraded from alert — **the owner's label always beats the model**.
+7. KB (`knowledge/`): every clip's thumb+frames+verdict under `clips/<hash>/` with `meta.json` (incl. `ev` = evidence layout + `EVIDENCE_VERSION`, and the thumb gray vector). **`kb_evidence` cache: re-judges reuse cached frames — zero ffmpeg** unless the version bumped. `examples/` holds promoted FP/TP/owner evidence; owner cards pin ≤3 reference images.
+8. Alerting: `notify()` — osascript on macOS, **SMTP email** when configured: `ALERTER_SMTP_HOST/PORT/USER`, `ALERTER_MAIL_FROM/TO`, clip attached if ≤ `ALERTER_MAIL_MAX_MB` (20) else thumbnail+path. Gmail setup in `/etc/alerter.env`; **app password must live in `/etc/alerter-smtp.pass` (root-only, created by the owner — never in chat/logs)**. Mail failures never kill the watcher.
+9. `--eval` = golden set (every fp/tp/owner mark) re-judged with the current pipeline → confusion matrix + misses appended to `eval_history.jsonl`. **`fn` (missed real threats) is the metric to guard.** Measure before/after every prompt/pipeline change.
 
-- `/Volumes/aaron` is a network mount: it can be stale or unmounted. Check `mount | grep aaron` / stat the directory before assuming "no new files". If missing, remount: `mount_smbfs '//aaron@TNAS(SMB)._smb._tcp.local/aaron' /Volumes/aaron` (credentials are in the macOS keychain).
-- SMB + many small files is slow. Enumerate with one `ls`/`find` per day dir, not per file. Filenames contain spaces — always quote.
-- Never write into the capture tree. It is SecuritySpy's; a new file appearing mid-write looks complete but isn't — treat a file as ready only after its `.thm` exists and size is stable for one poll interval.
+## Runtime data — alerter.db (SQLite, WAL)
 
-## Machine notes
+`state.json` and `feedback.json` were migrated into **`alerter.db`** (2026-11-01; `*.pre-sqlite` backups kept). Tables: `clips` (watcher-owned statuses/baselines), `marks`, `examples`, `overrides`, `owners`, `meta`. Row `data` column holds the full JSON entry. All writes go through `alerter.update_feedback()` / `save_state()` — one `BEGIN IMMEDIATE` txn each, cross-process safe (watcher/review/CLI/mark-path all write). `reset_state()` re-enumerates. Review server inherits the watcher's recorded `config` (llm_base/model) from meta.
 
-- Both analysis machines are Apple Silicon macOS; `/Volumes/aaron` is mounted on both. Detect at startup (mount present?) rather than branching on hostname.
-- kahuna.local: SSH is `ssh aaron@kahuna.local` (alias `kahuna.local` in `~/.ssh/config`; user is `aaron`, NOT the local username). Homebrew installed at `/opt/homebrew`; in non-login SSH shells use full paths (`/opt/homebrew/bin/ffmpeg`). Has `ffmpeg`/`ffprobe` 9.x.
-- **Python**: run the watcher on the latest stable — **3.15** (`/opt/homebrew/bin/python3.15` on both analysis machines; system `/usr/bin/python3` is 3.9, do not target it). Keep the watcher **stdlib-only** so it needs no venv. (**3.13** existed only for the uninstalled uvx `mlx-serve` fallback; nothing in this project needs it.)
-- LLM servers already running on kahuna (installed, do not re-install): **MLX-Serve.app** (v26.10.3) — OpenAI-compatible on **:11234**, host 0.0.0.0, LAN-shared, GUI-managed. Lazy-loads models from its model dirs (`~/Desktop/mlx-llms`, `~/.mlx-serve/models`, `~/Desktop/lmstudio-llms`, `~/Desktop/omlx-llms`); up to 4 resident, idle-evict after 4 h. Serves BOTH the coding model (`ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-4.7bpw`) and the alerter's VL model (`lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-8bit` — loads on first request even when absent from `/v1/models`). The uvx `mlx-serve` manager on :8095 was **uninstalled 2026-11-01** (uv cache cleaned; config kept at `~/mlx-serve/models.yaml`, reinstall cmd in README). **oMLX.app** (v0.7.3.dev2, `app.omlx`) also exists with its own server.
-- Dev Mac: Homebrew `ffmpeg`/`ffprobe` 9.x and `python3` 3.15 installed. Frame extraction pattern: `ffprobe` for duration, then `ffmpeg -ss <t> -frames:v 1` at a few sampled timestamps.
+**Tracked in git** (this repo, root = `non-work-projects`): `alerter.db`, `scene.json`, `knowledge/clips.jsonl`, `knowledge/examples/*/meta.json|thumb.jpg`. Pull from TNAS + commit periodically — that's the backup:
+```
+rsync -a aaron@192.168.4.130:/Volume1/SecuritySpy/alerter/{alerter.db,scene.json,knowledge/clips.jsonl} video-alerter/  # + examples
+```
 
-## Design constraints for LLM-written code
+## Review UI (review.py)
 
-- SecuritySpy recording has priority on kahuna: cap ffmpeg concurrency at 1. Evidence is now richer by owner choice ("we have lots of compute"): 8 motion-peak-sampled frames (ffmpeg scene scores, uniform fill), night/IR contrast boost, and a magnified crop of the motion region per clip.
-- Self-consistency voting: each clip judged `ALERTER_VOTES` (default 5) times at temp 0.7; alert requires `ALERTER_VOTE_QUORUM` (default 1.0 = unanimous HIGH). This crushes the stochastic FP tail. Guard: high quorum raises FN (missed real threats) — measure with `--eval` and lower the quorum if `fn` climbs. Pre-filter (dedupe/FP suppression) still runs first so most clips never reach the LLM.
-- LLM calls are cheap relative to available compute but still pre-filtered: dedupe and only send clips that pass to a vision model. Thumbnail diffs are **brightness/contrast-normalized** (`norm_gray`) so cloud-shadow/exposure ramps don't masquerade as events (same frame under a 30% darkening: raw diff 65 → normalized 6). The remaining median ~35 between clips is genuine content change, so dedupe (threshold 12; 20 within a 3-min event window) only trims repeat segments, not real motion. Assume most clips reach the LLM.
-- `--eval` (golden set = every fp/tp/owner mark) re-judges marked clips with the current pipeline and appends a confusion matrix + misses to `eval_history.jsonl`. Measure before/after any prompt/threshold/pipeline change; `fn` (missed real threats) is the metric to guard in a security system.
-- Wind and weather: environmental motion is structural (leaves genuinely move), so it can't be deduped away — the prompt hard rule ("environmental motion is threat=none no matter how much of the frame is moving") + scene map vegetation zones + owner FP feedback are the defense. If windy days still produce HIGH verdicts, that's feedback-loop material.
-- Persist state (last-seen file per camera) in `alerter.db` (was `state.json`); the capture tree is read-only ground truth.
-- Alerting goes to me — prefer macOS notification + a log line; any push channel gets chosen later.
-- Learning is prompt-side, not weights, backed by a disk knowledge base:
-  - `scene.json` — per-camera permanent-layout description (auto-learned when missing, `--learn-scene` to refresh).
-  - `knowledge/clips/<hash>/` — every analyzed clip keeps its thumb, 3 sampled frames, and verdict (`meta.json`), plus an append-only `clips.jsonl`. `knowledge/examples/` holds the same evidence for every reviewed (FP/TP) clip. Ceiling `ALERTER_KB_MAX_MB` (default 20 GB; ~1 MB/clip → years of history).
-  - `alerter.db` (SQLite, WAL — was `feedback.json`, auto-migrated 2026-11-01) — marks (audit trail) + up to 100 FP corrections with normalized-thumbnail vectors for deterministic suppression + `owners` (≤5 pinned resident reference cards). Cards mean **owner-approved people** (household, neighbors, workers — e.g. "Bill the neighbor" + his worker): caption + prompt text say NEVER a threat; UI button is "known person". Clips marked fp/owner whose effective status is `alert` get force-downgraded to `ok` (`owner_label_override`) — owner label beats the model. All learned knowledge lives here; watcher/review/learn-worker/CLI write through `alerter.update_feedback()` (one BEGIN IMMEDIATE txn per mutation — cross-process safe). Row `data` column holds the full JSON entry. **Tracked in git** (plus `scene.json`, `knowledge/clips.jsonl`, `knowledge/examples/*/meta.json|thumb.jpg`): pull from TNAS and commit periodically — that's the backup.
-  - Prompt injection per call: scene map + owner cards (text for all ≤5 + up to 3 pinned **images** captioned "Owner-approved resident … NEVER a threat", exempt from recency rotation — this is identity learning) + 5 newest text corrections + up to 3 FP example **images** (captioned "Owner-labeled FALSE POSITIVE …").
-- Owner corrections: `alerter.py --mark SUB --label fp|tp|ignore|owner --note …` or the review UI buttons (same code path; fp/tp/owner also promote the clip's evidence into `knowledge/examples/`; `ignore` teaches nothing; `owner` pins the resident card).
-- **File ownership invariant**: everything now lives in `alerter.db` (SQLite WAL; `state.json`/`feedback.json` auto-migrated 2026-11-01, backups kept as `*.pre-sqlite`). Discipline by role: the watcher is the only writer of clip statuses/baselines (`clips` table); review/mark paths are the only writers of marks/examples/overrides/owners. Concurrent processes are transaction-safe via `update_feedback()`/`save_state()`. A re-eval (`POST /api/reeval`, re-runs the VLM with current knowledge) stores its result in the `overrides` table; the review UI shows the override in place of the clip status. The watcher records its `config` (llm_base, model) at startup so the review server inherits the same endpoint.
+http://192.168.4.130:8765 — newest-day-first chips (default = today), alerts filter, thumbnail→clip player, verdict text with `judged <time>` (re-eval stamped), buttons: false positive / real alert / **known person** (pins owner card) / ignore / **re-evaluate** (shows progress + timestamped result). Re-eval stores overrides; the UI shows the override in place of the original. Learn worker (`ALERTER_LEARN_INTERVAL`, 60 s in prod): round-robin re-judge, alerts ×2 weight, **clips similar to learned FP corrections jump the queue**, missing-evidence clips blacklisted.
 
-## LLM requirements (what must be running on the analysis machine)
+## Throttles & etiquette
 
-- **Primary endpoint: MLX-Serve.app on kahuna :11234, model `lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-8bit`** — `Qwen3-VL-30B-A3B-Instruct` (vision-first MoE, DeepStack enabled, ~3B active so fast). The app lazy-loads it by model ID on first request (even when absent from `/v1/models`), keeps up to 4 models resident, idle-evict 4 h — the watcher's cadence keeps it warm. Current alerter config in `/etc/alerter.env`: `ALERTER_LLM_BASE=http://kahuna.local:11234/v1`, `ALERTER_LLM_MODEL=lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-8bit`.
-- **Fallback:** the uvx `mlx-serve` manager (:8095) was **uninstalled 2026-11-01** — reinstall + start via the command in README §1 if ever needed; it could serve `qwen3-vl-30b-a3b` (bf16) or `qwen2.5-vl-3b`. Set the two env vars to switch.
-- **Vision model is required** — must accept base64 `image_url` content parts. Qwen3-VL is chosen specifically for small-object/night-IR recall that the Flash-Next model's non-DeepStack vision tower misses.- Text model (`Qwen3.5-9B`) is optional — only for a later summarizer/deduper of alerts.
-- The watcher degrades gracefully: if no LLM endpoint answers, it still does motion pre-filtering, logs candidate clips, and alerts "unanalyzed" rather than crashing.
+TNAS is a 4-core NAS: watcher `--interval 240`, learn 60 s, `ALERTER_EVAL_DELAY` ≥3. One ffmpeg at a time globally. Raise pace only deliberately and revert after. `notify()` email is the alert channel of record; log line always (`alerts.log` + journald).

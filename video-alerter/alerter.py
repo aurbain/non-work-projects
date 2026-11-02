@@ -106,7 +106,10 @@ PROMPT = (
     "threat=high no matter who performs them. "
     "Never guess a person's identity from context alone: only name someone if you can cite a "
     "distinguishing feature visible in THESE frames (clothing, vehicle, build, gait) that matches "
-    "a reference description or image; otherwise say 'unknown person' and judge them as a stranger."
+    "a reference description or image; otherwise say 'unknown person' and judge them as a stranger. "
+    "Time-of-day policy: a person approaching or standing at the FRONT DOOR or porch is routine "
+    "between 09:00 and 20:00, but threat=high before 09:00 or after 20:00 unless they clearly "
+    "match an owner-approved card."
 )
 
 SCENE_PROMPT = (
@@ -611,8 +614,29 @@ def send_mail(title, body, clip=None):
         log("MAILED %s (%s%s)" % (title, MAIL_TO, "" if attached else ", thumb only"))
         return True
     except Exception as e:  # never let a mail failure kill the watcher
+        global LAST_MAIL_ERROR
+        LAST_MAIL_ERROR = repr(e)
         log("MAIL FAILED %s: %r" % (title, e))
         return False
+
+
+LAST_MAIL_ERROR = None  # type: Optional[str]
+
+
+def test_mail():
+    # type: () -> Tuple[bool, str]
+    """Send a test message and report the config/connectivity problem instead of
+    silently logging it (review UI button)."""
+    global LAST_MAIL_ERROR
+    if not SMTP_HOST or not MAIL_TO:
+        return False, "SMTP not configured (ALERTER_SMTP_HOST / ALERTER_MAIL_TO in /etc/alerter.env)"
+    if SMTP_USER and not _smtp_password():
+        return False, ("password missing — create /etc/alerter-smtp.pass (root-only, chmod 600) "
+                       "with a Gmail app password")
+    LAST_MAIL_ERROR = None
+    ok = send_mail("video-alerter: test email",
+                   "Test from the review UI. If this arrived, alerting works.")
+    return ok, ("sent to %s" % MAIL_TO) if ok else (LAST_MAIL_ERROR or "send failed")
 
 
 def attach_media(msg, clip):
@@ -1321,6 +1345,7 @@ def analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs=Non
             status = "ok"
             msg = "[downgraded: matches reviewed FP %s] %s" % (
                 dup["clip"].split("/")[-1][:28], msg)
+    status, msg = night_door_escalate(when, status, msg, load_feedback().get("owners", []))
     set_baseline()
     return status, msg, frames + [img for _, img in extras if img], thm, {
         "v": EVIDENCE_VERSION, "n": len(frames),
@@ -1396,6 +1421,34 @@ def mark_feedback(fb, state, clip_substr, label, note):
             fb["examples"] = [ex] + [e for e in fb.get("examples", []) if e.get("clip") != k][:99]
     fb["examples"] = fb.get("examples", [])[:100]
     return matches
+
+
+QUIET_START = int(os.environ.get("ALERTER_QUIET_START", "20"))  # 20:00 onward is quiet hours
+QUIET_END = int(os.environ.get("ALERTER_QUIET_END", "9"))        # ...through 09:00
+DOOR_RE = re.compile(r"\b(front door|porch|doorknob|doorway|entry door|storm door|front step)\b", re.I)
+
+
+def in_quiet_hours(when):
+    # type: (str) -> bool
+    try:
+        h = int(when.split(" ")[1].split(":")[0])
+    except (IndexError, ValueError):
+        return False
+    return h >= QUIET_START or h < QUIET_END
+
+
+def night_door_escalate(when, status, msg, owners):
+    # type: (str, str, str, Optional[List[Dict]]) -> Tuple[str, str]
+    """Owner policy: an unverified person at the front door during quiet hours is an alert,
+    even if the votes said ok. Garage is not the door; learned FP corrections still win."""
+    if status != "ok" or "downgraded: matches reviewed FP" in (msg or ""):
+        return status, msg
+    if not in_quiet_hours(when) or not DOOR_RE.search(msg or ""):
+        return status, msg
+    if identity_claimed(msg, owners or []):
+        return status, msg
+    return "alert", ("[night door policy: unverified person at the front door outside %02d:00-%02d:00] %s"
+                     % (QUIET_END, QUIET_START, msg))
 
 
 def owner_label_override(fb, rel, status, msg):
@@ -1492,6 +1545,7 @@ def judge_clip(rel, fb):
             status2, msg2 = llm_analyze_vote(frames, strict, False, kb_example_images(fb["examples"]), extras)
             msg = "[identity unverified: %s] %s" % (verdict.lower(), msg2)
             status = status2
+    status, msg = night_door_escalate(when, status, msg, owners)
     return status, msg, frames, thm, extras
 
 
@@ -1567,7 +1621,7 @@ def run_eval(args):
     except OSError:
         pass
     log("EVAL n=%d tp=%d fp=%d tn=%d fn=%d err=%d  precision=%.2f recall=%.2f  (%.1f min) -> %s" % (
-        n, tp, fp_, tn, fn, err, prec, rec, os.path.basename(EVAL_HISTORY)))
+        n, tp, fp_, tn, fn, err, prec, rec, summary["minutes"], os.path.basename(EVAL_HISTORY)))
     for ms in misses:
         log("  MISS %s [%s] got=%s  %s" % (ms["clip"].split("/")[-1][:30], ms["label"], ms["got"], ms["why"]))
     return 0

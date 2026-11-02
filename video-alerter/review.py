@@ -211,19 +211,21 @@ function render(){
     // re-evaluated-and-downgraded clips are "resolved" — hidden unless show-all is on
     const clips=cam.clips.filter(c=>(!only||c.status==='alert')&&(showMarked||!c.marked)
                                     &&(showMarked||!(c.reeval_at&&c.status==='ok')))
-                         .sort((a,b)=>((a.status==='alert'?0:1)-(b.status==='alert'?0:1))||a.when.localeCompare(b.when));
+                         .sort((a,b)=>((a.status==='alert'?0:1)-(b.status==='alert'?0:1))||b.when.localeCompare(a.when));
     if(!clips.length)return;
     html+=`<div class="cam">${esc(cam.name)} — ${clips.length} clip${clips.length>1?'s':''}</div>`;
     if(cam.scene)html+=`<div class="scene">${esc(cam.scene)}</div>`;
     clips.forEach(c=>{
       const mk=c.marked?(c.marked.label==='ignore'?'b-ignore':c.marked.label==='owner'?'b-owner':'b-marked'):'';
       const marked=c.marked?`<span class="badge ${mk}">${esc(c.marked.label)}${c.marked.note?': '+esc(c.marked.note):''}</span>`:'';
+      const judgedAt=c.reeval_at||c.judged_at;
+      const jt=judgedAt?`<span class="muted">judged ${new Date(judgedAt*1000).toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}${c.reeval_at?' (re-eval)':''}</span>`:'';
       const rebadge=c.reeval_at?`<span class="badge b-reeval">re-evaluated</span>`:'';
       const m=c.msg?fmtMsg(c.msg):'<span class="muted">not analyzed yet — waiting in the watcher queue</span>';
-      html+=`<div class="card"><div class="frame"><img src="/thumb?clip=${encodeURIComponent(c.clip)}" onclick="play(this,'${esc(c.clip)}')">
+      html+=`<div class="card" data-clip="${esc(c.clip)}"><div class="frame"><img src="/thumb?clip=${encodeURIComponent(c.clip)}" onclick="play(this,'${esc(c.clip)}')">
       <div class="cap ${c.status==='alert'?'hot':''}">${m}</div></div>
       <div class="body"><span class="when">${esc(c.when)}</span>
-      <span class="badge b-${c.status}">${c.status}</span>${marked}${rebadge}
+      <span class="badge b-${c.status}">${c.status}</span>${jt} ${marked}${rebadge}
       <div class="markbar"><input placeholder="name / why not alarming? (optional note)" id="n-${esc(c.clip)}">
       <button class="fp" onclick="mark('${esc(c.clip)}','fp')">false positive</button>
       <button class="tp" onclick="mark('${esc(c.clip)}','tp')">real alert</button>
@@ -279,14 +281,18 @@ async function pollLearn(){
 document.getElementById('learnMode').onchange=e=>setLearn(e.target.checked);
 async function reeval(clip,btn){
   const el=document.getElementById('count'), t=el.textContent;
+  const card=btn.closest('.card'), cap=card.querySelector('.cap');
   document.querySelectorAll('button.reeval').forEach(b=>b.disabled=true);
   btn.textContent='re-evaluating…'; el.textContent='re-evaluating with current knowledge…';
+  cap.innerHTML='<span class="muted">re-evaluating… 30–90 s (five votes'+
+    (cap.textContent.includes('known person')||cap.textContent.toLowerCase().includes('bill')?', + identity check':'')+')</span>';
   try{
     const r=await j('/api/reeval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clip})});
     await loadDay();
-    el.textContent=r.ok?`✓ re-evaluated → ${r.status}`:`re-eval failed: ${r.status}`;
+    el.textContent=r.ok?`✓ re-evaluated ${clip.split('/').pop().slice(0,24)} → ${r.status} (judged ${new Date().toLocaleString(undefined,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})})`
+                       :`re-eval FAILED for ${clip.split('/').pop().slice(0,24)}: ${r.status}`;
   }catch(e){el.textContent='re-eval error: '+e;}
-  setTimeout(()=>el.textContent=t,4000);
+  setTimeout(()=>el.textContent=t,12000);
 }
 loadDays();
 j('/api/learn').then(s=>{const cb=document.getElementById('learnMode');cb.checked=s.on;
@@ -446,6 +452,7 @@ class Handler(BaseHTTPRequestHandler):
                 "status": entry.get("status", "?"),
                 "msg": entry.get("msg", ""),
                 "marked": fb["marks"].get(k),
+                "judged_at": entry.get("done_at"),
             }
             if ov:
                 item["status"] = ov["status"]
