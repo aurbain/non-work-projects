@@ -58,6 +58,9 @@ DIFF_THRESHOLD = float(os.environ.get("ALERTER_DIFF_THRESHOLD", "12.0"))
 EVENT_WINDOW_S = float(os.environ.get("ALERTER_EVENT_WINDOW", "180"))
 EVENT_DIFF_THRESHOLD = float(os.environ.get("ALERTER_EVENT_DIFF_THRESHOLD", "20.0"))
 FP_THUMB_DIFF = float(os.environ.get("ALERTER_FP_THUMB_DIFF", "5.0"))
+# Bump when extract_evidence's pipeline (frames, crop, night boost) changes: cached
+# KB evidence stays valid across prompt/knowledge changes but not across pipeline changes.
+EVIDENCE_VERSION = 1
 FP_TEXT_SIM = float(os.environ.get("ALERTER_FP_TEXT_SIM", "0.5"))
 
 # Evidence richness: frames per clip, motion-peak sampling, zoomed action crop, night boost.
@@ -97,7 +100,13 @@ PROMPT = (
     "threat=none means environmental motion only: swaying trees/branches/grass in wind, "
     "moving or fading shadows, cloud-driven light changes, rain or snow, camera noise, "
     "small creatures, or no clear subject. Environmental motion is threat=none no matter "
-    "how much of the frame is moving."
+    "how much of the frame is moving. "
+    "If owner-approved people are listed: their PRESENCE anywhere on or around the property is "
+    "routine — but dangerous actions (breaking in, damaging property, fire, violence) are "
+    "threat=high no matter who performs them. "
+    "Never guess a person's identity from context alone: only name someone if you can cite a "
+    "distinguishing feature visible in THESE frames (clothing, vehicle, build, gait) that matches "
+    "a reference description or image; otherwise say 'unknown person' and judge them as a stranger."
 )
 
 SCENE_PROMPT = (
@@ -285,8 +294,8 @@ def kb_free_bytes():
     return max(0, KB_MAX_MB * 1024 * 1024 - total)
 
 
-def kb_store_clip(rel, when, camera, status, msg, thm_jpeg, frames):
-    # type: (str, str, str, str, str, Optional[bytes], List[bytes]) -> str
+def kb_store_clip(rel, when, camera, status, msg, thm_jpeg, frames, ev=None):
+    # type: (str, str, str, str, str, Optional[bytes], List[bytes], Optional[Dict]) -> str
     """Persist everything the system saw and concluded for one clip."""
     d = kb_dir_for("clips", rel)
     try:
@@ -301,6 +310,12 @@ def kb_store_clip(rel, when, camera, status, msg, thm_jpeg, frames):
                 f.write(img)
         meta = {"clip": rel, "when": when, "camera": camera, "status": status,
                 "msg": msg, "model": LLM_MODEL, "at": time.time()}
+        if ev:
+            meta["ev"] = ev
+        if thm_jpeg:
+            gray = jpeg_to_gray(thm_jpeg)
+            if gray is not None:
+                meta["gray"] = list(gray)
         with open(os.path.join(d, "meta.json"), "w") as f:
             json.dump(meta, f)
         with open(os.path.join(KB_DIR, "clips.jsonl"), "a") as f:
@@ -308,6 +323,44 @@ def kb_store_clip(rel, when, camera, status, msg, thm_jpeg, frames):
     except OSError:
         pass
     return d
+
+
+def kb_evidence(rel):
+    # type: (str) -> Optional[Tuple[List[bytes], List[Tuple[str, bytes]], Optional[bytes]]]
+    """Cached (frames, extras, thumb) from a previous analysis, when the KB holds a
+    complete set stored under the current EVIDENCE_VERSION — re-judges then need no ffmpeg."""
+    d = kb_dir_for("clips", rel)
+    try:
+        with open(os.path.join(d, "meta.json")) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return None
+    ev = meta.get("ev")
+    if not ev or ev.get("v") != EVIDENCE_VERSION:
+        return None
+    n = ev.get("n", 0)
+    try:
+        frames = []
+        for i in range(n):
+            with open(os.path.join(d, "frame%d.jpg" % i), "rb") as f:
+                frames.append(f.read())
+        extras = []
+        j = n
+        for cap, has_img in ev.get("x", []):
+            img = b""
+            if has_img:
+                with open(os.path.join(d, "frame%d.jpg" % j), "rb") as f:
+                    img = f.read()
+                j += 1
+            extras.append((cap, img))
+        thm = None
+        tp = os.path.join(d, "thumb.jpg")
+        if os.path.isfile(tp):
+            with open(tp, "rb") as f:
+                thm = f.read()
+        return frames, extras, thm
+    except OSError:
+        return None
 
 
 def kb_promote_example(clip_rel, label, note):
@@ -387,7 +440,9 @@ def build_prompt(camera, when, scenes, examples, owners=None):
     if owners:
         p += (" Owner-approved people (household, neighbors, or their workers — pinned reference images "
               "may accompany these): their presence and movement on or around the property "
-              "(garage, driveway, house, vehicles) is routine and NEVER an intrusion, suspicious behavior, or a threat:")
+              "(garage, driveway, house, vehicles) is routine and NEVER an intrusion, suspicious behavior, or a threat. "
+              "An owner correction saying a person is NOT someone (e.g. 'not Bill') overrides any "
+              "card: treat such people as unknown strangers:")
         p += "; ".join("%s" % (o.get("note") or o["clip"].split("/")[-1][:30]) for o in owners[:5]) + "."
     if examples:
         p += " Owner corrections on past alerts — respect them when judging similar scenes:"
@@ -1064,6 +1119,11 @@ def extract_evidence(video):
     return frames, extras
 
 
+def b64_data(img):
+    # type: (bytes) -> str
+    return "data:image/jpeg;base64," + base64.b64encode(img).decode("ascii")
+
+
 def llm_chat(content, temp=0.0):
     # type: (List[Dict], float) -> str
     body = json.dumps({
@@ -1198,7 +1258,7 @@ def process_cycle(state, args):
         examples, owners = fb["examples"], fb.get("owners", [])
         prompt = build_prompt(camera, when, scenes, examples, owners)
         ex_imgs = kb_owner_images(owners) + kb_example_images(examples)
-        status, msg, frames, thm = analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs)
+        status, msg, frames, thm, ev_desc = analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs)
         if status == "unanalyzed" and entry.get("retries", 0) < 2:
             entry["retries"] = entry.get("retries", 0) + 1
             entry["seen_polls"] = 1
@@ -1207,7 +1267,7 @@ def process_cycle(state, args):
         entry["status"], entry["msg"] = owner_label_override(fb, rel, status, msg)
         status = entry["status"]
         entry["done_at"] = time.time()
-        kb_store_clip(rel, when, camera, status, msg, thm, frames)
+        kb_store_clip(rel, when, camera, status, msg, thm, frames, ev=ev_desc)
         processed += 1
         if status == "alert":
             log("ALERT %s: %s" % (rel, msg))
@@ -1246,13 +1306,13 @@ def analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs=Non
         if d < thr:
             set_baseline()
             return "skip", "repeat clip (diff %.1f < %.1f%s)" % (
-                d, thr, ", within event window" if in_event else ""), [], thm
+                d, thr, ", within event window" if in_event else ""), [], thm, None
         hit = fp_thumb_match(new_gray, examples)
         if hit is not None:
             set_baseline()
             return "skip", "matches reviewed FP %s (thumb diff %.1f)%s" % (
                 hit[0]["clip"].split("/")[-1][:28], hit[1],
-                " — " + hit[0]["note"] if hit[0].get("note") else ""), [], thm
+                " — " + hit[0]["note"] if hit[0].get("note") else ""), [], thm, None
     frames, extras = extract_evidence(video)
     status, msg = llm_analyze_vote(frames, prompt, args.no_llm, ex_imgs, extras)
     if status == "alert":
@@ -1262,7 +1322,9 @@ def analyze_clip(state, camera, when, video, prompt, examples, args, ex_imgs=Non
             msg = "[downgraded: matches reviewed FP %s] %s" % (
                 dup["clip"].split("/")[-1][:28], msg)
     set_baseline()
-    return status, msg, frames + [img for _, img in extras if img], thm
+    return status, msg, frames + [img for _, img in extras if img], thm, {
+        "v": EVIDENCE_VERSION, "n": len(frames),
+        "x": [[c, bool(img)] for c, img in extras]}
 
 
 def learn_scene(camera, args):
@@ -1348,6 +1410,56 @@ def owner_label_override(fb, rel, status, msg):
     return status, msg
 
 
+def owner_name(note):
+    # type: (str) -> str
+    """Best-effort display name from a free-text owner card note ('Bill the neighbor' -> Bill)."""
+    words = re.findall(r"\b[A-Z][a-z]{2,}\b", note or "")
+    skip = {"Owner", "Approved", "Known", "Household", "Neighbor", "Neighbour", "Worker",
+            "Person", "Their", "Their"}
+    for w in words:
+        if w not in skip:
+            return w
+    return ""
+
+
+def identity_claimed(msg, owners):
+    # type: (str, List[Dict]) -> Optional[Dict]
+    """The owner card whose name the verdict text asserts, if any."""
+    low = (msg or "").lower()
+    for o in owners:
+        n = owner_name(o.get("note", "")).lower()
+        if len(n) >= 3 and n in low:
+            return o
+    return None
+
+
+def identity_verify(frames, extras, owner):
+    # type: (List[bytes], List[Tuple[str, bytes]], Dict) -> Optional[str]
+    """Neutral second opinion: SAME / DIFFERENT / UNSURE. No 'NEVER a threat' framing —
+    the first pass is biased toward the residents; this one must not be."""
+    imgs = kb_owner_images([owner])
+    usable = [f for f in frames[:6] if f]
+    if not imgs or not usable:
+        return None
+    content = []
+    for cap, img in imgs:
+        content.append({"type": "text", "text": "Reference image of the alleged resident: %s" % cap})
+        content.append({"type": "image_url", "image_url": {"url": b64_data(img)}})
+    content.append({"type": "text", "text":
+        "These frames are from a motion clip. Compare the person appearing in the frames with "
+        "the reference image(s). Reply with ONLY one word: SAME, DIFFERENT, or UNSURE."})
+    for img in usable:
+        content.append({"type": "image_url", "image_url": {"url": b64_data(img)}})
+    try:
+        reply = llm_chat(content).strip().upper()
+    except Exception:
+        return None
+    for verdict in ("SAME", "DIFFERENT", "UNSURE"):
+        if verdict in reply:
+            return verdict
+    return None
+
+
 def judge_clip(rel, fb):
     # type: (str, Dict) -> Tuple[str, str, List[bytes], Optional[bytes], List[Tuple[str, bytes]]]
     """Analyze one clip with CURRENT knowledge (scene + owners + FP examples), no dedupe,
@@ -1355,14 +1467,32 @@ def judge_clip(rel, fb):
     video = os.path.join(ROOT, rel)
     camera = rel.split("/")[0]
     when = clip_start_time(rel.split("/")[-1])
-    if not os.path.isfile(video):
+    ev = kb_evidence(rel)
+    if ev is None and not os.path.isfile(video):
         return "error", "clip file missing on disk", [], None, []
     examples, owners = fb["examples"], fb.get("owners", [])
     prompt = build_prompt(camera, when, load_scenes(), examples, owners)
     ex_imgs = kb_owner_images(owners) + kb_example_images(examples)
-    frames, extras = extract_evidence(video)
+    if ev is not None:
+        frames, extras, thm = ev
+    else:
+        frames, extras = extract_evidence(video)
+        thm = decode_thm_jpeg(thm_path(video))
     status, msg = llm_analyze_vote(frames, prompt, False, ex_imgs, extras)
-    return status, msg, frames, decode_thm_jpeg(thm_path(video)), extras
+    card = identity_claimed(msg, owners) if status != "alert" else None
+    if card is not None:
+        verdict = identity_verify(frames, extras, card)
+        if verdict in ("DIFFERENT", "UNSURE"):
+            log("IDENTITY %s: claimed %s but verify=%s — re-judging as unknown" % (
+                rel.split("/")[-1][:28], owner_name(card.get("note", "")), verdict))
+            strict = prompt + (" VERIFICATION FAILED: the person in these frames has been checked "
+                               "against the resident references and does NOT match (or cannot be "
+                               "confirmed). No resident card applies to this clip. Judge every "
+                               "person as an unknown stranger.")
+            status2, msg2 = llm_analyze_vote(frames, strict, False, kb_example_images(fb["examples"]), extras)
+            msg = "[identity unverified: %s] %s" % (verdict.lower(), msg2)
+            status = status2
+    return status, msg, frames, thm, extras
 
 
 def reeval_clip(rel):
@@ -1376,7 +1506,9 @@ def reeval_clip(rel):
         return status, msg
     status, msg = owner_label_override(fb, rel, status, msg)
     kb_store_clip(rel, clip_start_time(rel.split("/")[-1]), rel.split("/")[0], status, msg,
-                  thm, frames + [img for _, img in extras if img])
+                  thm, frames + [img for _, img in extras if img],
+                  ev={"v": EVIDENCE_VERSION, "n": len(frames),
+                      "x": [[c, bool(img)] for c, img in extras]})
     update_feedback(lambda fb: fb.setdefault("overrides", {}).__setitem__(
         rel, {"status": status, "msg": msg, "at": time.time()}))
     return status, msg

@@ -34,11 +34,46 @@ LEARN_STATUSES = ("alert", "unanalyzed", "ok")
 LEARN = {"done": 0, "fail": 0, "current": None, "last": "", "failed": {}}
 
 
+VEC_TTL = 300.0
+_VEC_CACHE = {"at": 0.0, "map": {}}
+
+
+def clip_vectors():
+    # type: () -> dict
+    """rel -> thumb gray vector, from KB clip metas (cached; empty until metas gain gray)."""
+    if time.time() - _VEC_CACHE["at"] > VEC_TTL:
+        m = {}
+        root = os.path.join(alerter.KB_DIR, "clips")
+        try:
+            for d in os.listdir(root):
+                try:
+                    with open(os.path.join(root, d, "meta.json")) as f:
+                        meta = json.load(f)
+                    if meta.get("gray") and meta.get("clip"):
+                        m[meta["clip"]] = meta["gray"]
+                except (OSError, ValueError):
+                    pass
+        except OSError:
+            pass
+        _VEC_CACHE.update(at=time.time(), map=m)
+    return _VEC_CACHE["map"]
+
+
+def correction_vectors(fb):
+    # type: (dict) -> list
+    """Thumb vectors of the FP corrections the suppression loop learned from."""
+    return [bytes(e["gray"]) for e in fb.get("examples", [])[:20] if e.get("gray")]
+
+
 def pick_learn_clip(state, fb):
     # type: (dict, dict) -> str
-    """Round-robin over the corpus by oldest re-eval; alerts rotate ~2x (their age counts double)."""
+    """Round-robin over the corpus by oldest re-eval; alerts rotate ~2x (their age counts
+    double). Clips whose thumb is within FP-suppression distance of a learned correction
+    jump the queue: those are exactly the ones a knowledge change could flip."""
     ov = fb.get("overrides", {})
     now = time.time()
+    vecs = correction_vectors(fb)
+    vectors = clip_vectors() if vecs else {}
     best, best_key = None, None
     for k, e in state.get("clips", {}).items():
         st = ov.get(k, {}).get("status", e.get("status"))
@@ -48,6 +83,11 @@ def pick_learn_clip(state, fb):
         if now - last_fail < LEARN_FAIL_COOLDOWN:
             continue
         at = ov.get(k, {}).get("at", 0)
+        cg = vectors.get(k)
+        if cg:
+            cg = bytes(cg)
+            if min(alerter.gray_diff(cg, v) for v in vecs) < alerter.FP_THUMB_DIFF:
+                at = 0.0
         eff = at * 2 if st == "alert" else at
         # never-re-evaluated alerts go first; after that, plain oldest-first rotation
         key = (at != 0 and st != "alert", eff, k)
@@ -75,6 +115,9 @@ def learn_worker(stop):
             if status == "error":
                 LEARN["fail"] += 1
                 LEARN["failed"][rel] = time.time()
+                if "missing on disk" in msg:
+                    # no video and no cached evidence: re-judging this can never work
+                    LEARN["failed"][rel] = time.time() + 30 * 86400
             else:
                 LEARN["done"] += 1
             LEARN["last"] = "%s → %s" % (rel.split("/")[-1][:28], status)
@@ -143,11 +186,11 @@ function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>'
 function fmtMsg(m){return esc(m).replace(/^\[(HIGH|LOW)\]\s*/,m2=>'<span class="threat">'+m2.trim()+'</span> ')}
 async function loadDays(){
   const d=await j('/api/days'); const el=document.getElementById('days'); el.innerHTML='';
-  d.days.slice(0,21).reverse().forEach(dt=>{
+  d.days.slice(-21).reverse().forEach(dt=>{
     const c=document.createElement('span');c.className='chip';c.textContent=dt;
     c.onclick=()=>{day=dt;[...el.children].forEach(x=>x.classList.toggle('sel',x.textContent===dt));loadDay()};
     el.appendChild(c)});
-  if(d.days.length){day=d.days[d.days.length-1];el.lastChild.classList.add('sel');loadDay()}
+  if(d.days.length){day=d.days[d.days.length-1];el.firstChild.classList.add('sel');loadDay()}
   else document.getElementById('out').innerHTML='<div class="empty">no clips in state yet</div>';
 }
 async function loadDay(){
