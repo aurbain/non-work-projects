@@ -175,6 +175,7 @@ button.fp:hover{border-color:#c0392b}button.tp:hover{border-color:#27ae60}
 <label><input type="checkbox" id="showMarked"> show reviewed/resolved</label>
 <label style="color:#b9a5e0"><input type="checkbox" id="learnMode"> learn mode</label>
 <span id="learnStat" style="color:#b9a5e0;font-size:12px"></span>
+<button id="testMail" style="background:#2a2f3a;color:#c8ccd2;border:1px solid #3a4150;border-radius:6px;padding:3px 10px;cursor:pointer" onclick="testMail()">test alert</button><span id="mailStat" style="color:#9aa4b0;font-size:12px"></span>
 <span id="count" style="color:#9aa4b0"></span></header>
 <main id="out"><div class="empty">loading…</div></main>
 <div id="modal"><video id="mv" controls autoplay playsinline onclick="event.stopPropagation()"></video>
@@ -258,6 +259,16 @@ async function mark(clip,label){
       :`✓ pushed to learner — ${r.examples} active correction${r.examples===1?'':'s'}`;
     setTimeout(()=>el.textContent=t,4000);
   }
+}
+async function testMail(){
+  const b=document.getElementById('testMail'), el=document.getElementById('mailStat');
+  b.disabled=true; el.style.color='#9aa4b0'; el.textContent='sending…';
+  try{
+    const r=await j('/api/testmail',{method:'POST'});
+    el.style.color=r.ok?'#7ee787':'#ff7b72'; el.textContent=r.ok?'sent ✓':'failed: '+r.detail;
+  }catch(e){el.style.color='#ff7b72';el.textContent='request failed: '+e;}
+  b.disabled=false;
+  setTimeout(()=>{el.textContent=''},60000);
 }
 document.getElementById('alertsOnly').onchange=render;
 document.getElementById('showMarked').onchange=render;
@@ -353,7 +364,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         q = parse_qs(url.query)
         if url.path == "/":
-            self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
+            self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"),
+                       {"Cache-Control": "no-store"})
         elif url.path == "/api/days":
             state = alerter.load_state()
             days = sorted({k.split("/")[1] for k in state.get("clips", {}) if "/" in k})
@@ -392,6 +404,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/testmail":
+            ok, detail = alerter.test_alert()
+            self._json({"ok": ok, "detail": detail})
+            return
         if path == "/api/learnmode":
             try:
                 n = int(self.headers.get("Content-Length", "0"))

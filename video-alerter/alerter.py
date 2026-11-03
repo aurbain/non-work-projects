@@ -87,6 +87,10 @@ MAIL_FROM = os.environ.get("ALERTER_MAIL_FROM", SMTP_USER)
 MAIL_TO = os.environ.get("ALERTER_MAIL_TO", "")
 MAIL_MAX_BYTES = int(float(os.environ.get("ALERTER_MAIL_MAX_MB", "20")) * 1024 * 1024)
 
+TG_TOKEN_FILE = os.environ.get("ALERTER_TG_TOKENFILE", "/etc/alerter-tg.token")
+TG_CHAT = os.environ.get("ALERTER_TG_CHAT", "")
+TG_MAX_BYTES = 49 * 1024 * 1024  # Telegram bot API caps uploads at 50 MB
+
 CLIP_RE = re.compile(r"^(\d{2})-(\d{2})-(\d{4}) (\d{2})-(\d{2})-(\d{2}) (.+)\.m4v$")
 
 PROMPT = (
@@ -572,6 +576,7 @@ def notify(title, body, clip=None):
             subprocess.run(["osascript", "-e", script], timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             pass
+    send_telegram(title, body, clip)
     send_mail(title, body, clip)
 
 
@@ -584,6 +589,71 @@ def _smtp_password():
         except OSError:
             return ""
     return os.environ.get("ALERTER_SMTP_PASS", "")
+
+
+def _tg_token():
+    # type: () -> str
+    tok = os.environ.get("ALERTER_TG_TOKEN", "")
+    if tok:
+        return tok
+    if os.path.isfile(TG_TOKEN_FILE):
+        try:
+            with open(TG_TOKEN_FILE) as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+    return ""
+
+
+def _tg_api(method, fields, files=None):
+    # type: (str, Dict[str, str], Optional[Dict[str, Tuple[str, bytes, str]]]) -> None
+    """One Telegram Bot API call, multipart so a video/thumbnail can ride along."""
+    boundary = "----alerter%x" % (int(time.time() * 1000) & 0xFFFF)
+    parts = []
+    for k, v in fields.items():
+        parts.append(('--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n'
+                      % (boundary, k, v)).encode("utf-8"))
+    for k, (name, data, ctype) in (files or {}).items():
+        parts.append(('--%s\r\nContent-Disposition: form-data; name="%s"; filename="%s"\r\n'
+                      'Content-Type: %s\r\n\r\n' % (boundary, k, name, ctype)).encode("utf-8")
+                     + data + b"\r\n")
+    parts.append(("--%s--\r\n" % boundary).encode("utf-8"))
+    req = urllib.request.Request(
+        "https://api.telegram.org/bot%s/%s" % (_tg_token(), method), data=b"".join(parts),
+        headers={"Content-Type": "multipart/form-data; boundary=%s" % boundary})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        resp = json.loads(r.read().decode("utf-8"))
+    if not resp.get("ok"):
+        raise RuntimeError(str(resp.get("description")))
+
+
+def send_telegram(title, body, clip=None):
+    # type: (str, str, Optional[str]) -> bool
+    """Telegram bot push: the clip itself when it fits the 50 MB API cap, else its
+    thumbnail. No-op unless TG_TOKEN + ALERTER_TG_CHAT are configured."""
+    if not _tg_token() or not TG_CHAT:
+        return False
+    global LAST_MAIL_ERROR
+    caption = (title + "\n" + body)[:1000]
+    try:
+        if clip and os.path.isfile(clip) and os.path.getsize(clip) <= TG_MAX_BYTES:
+            with open(clip, "rb") as f:
+                _tg_api("sendDocument", {"chat_id": TG_CHAT, "caption": caption},
+                        {"document": (os.path.basename(clip), f.read(), "video/mp4")})
+        else:
+            thm = decode_thm_jpeg(thm_path(clip)) if clip else None
+            if thm:
+                _tg_api("sendPhoto", {"chat_id": TG_CHAT, "caption": caption + "\n" + (clip or "")},
+                        {"photo": ("thumb.jpg", thm, "image/jpeg")})
+            else:
+                _tg_api("sendMessage", {"chat_id": TG_CHAT,
+                                        "text": (caption + "\n" + (clip or ""))[:4000]})
+        log("TELEGRAM %s (chat %s)" % (title, TG_CHAT))
+        return True
+    except Exception as e:  # never let an alert failure kill the watcher
+        LAST_MAIL_ERROR = "telegram: " + repr(e)
+        log("TELEGRAM FAILED %s: %r" % (title, e))
+        return False
 
 
 def send_mail(title, body, clip=None):
@@ -618,6 +688,34 @@ def send_mail(title, body, clip=None):
         LAST_MAIL_ERROR = repr(e)
         log("MAIL FAILED %s: %r" % (title, e))
         return False
+
+
+def test_alert():
+    # type: () -> Tuple[bool, str]
+    """Send a test through every configured channel and report problems plainly
+    (review UI button) instead of only logging them."""
+    channels = []
+    if _tg_token() and TG_CHAT:
+        channels.append("telegram")
+    if SMTP_HOST and MAIL_TO:
+        channels.append("email")
+    if not channels:
+        return False, ("no alert channel configured — easiest: create a bot with @BotFather, "
+                       "put its token in /etc/alerter-tg.token (chmod 600), set ALERTER_TG_CHAT "
+                       "in /etc/alerter.env, DM the bot once")
+    results = []
+    ok_any = False
+    if "telegram" in channels:
+        global LAST_MAIL_ERROR
+        LAST_MAIL_ERROR = None
+        ok = send_telegram("video-alerter: test alert", "Test from the review UI.")
+        results.append("telegram: " + ("ok" if ok else (LAST_MAIL_ERROR or "failed")))
+        ok_any = ok_any or ok
+    if "email" in channels:
+        ok, detail = test_mail()
+        results.append("email: " + detail)
+        ok_any = ok_any or ok
+    return ok_any, "; ".join(results)
 
 
 LAST_MAIL_ERROR = None  # type: Optional[str]
